@@ -35,7 +35,8 @@ _heading(rhs._heading),
 _declutter(rhs._declutter),
 _image(rhs._image),
 _occlusionCull(rhs._occlusionCull),
-_occlusionCullAltitude(rhs._occlusionCullAltitude)
+_occlusionCullAltitude(rhs._occlusionCullAltitude),
+_pixelOffset(rhs._pixelOffset)
 {
 }
 
@@ -71,6 +72,9 @@ IconSymbol::getConfig() const
 	conf.set( "icon-occlusion-cull", _occlusionCull );
     conf.set( "icon-occlusion-cull-altitude", _occlusionCullAltitude );
 
+   conf.set( "pixel_offset_x", toString(_pixelOffset->x()) );
+   conf.set( "pixel_offset_y", toString(_pixelOffset->y()) );
+
     conf.setNonSerializable( "IconSymbol::image", _image.get() );
     return conf;
 }
@@ -92,6 +96,11 @@ IconSymbol::mergeConfig( const Config& conf )
     conf.get( "declutter", _declutter );
 	conf.get( "icon-occlusion-cull", _occlusionCull );
     conf.get( "icon-occlusion-cull-altitude", _occlusionCullAltitude );
+
+    if ( conf.hasValue( "pixel_offset_x" ) )
+        _pixelOffset = osg::Vec2s( conf.value<short>("pixel_offset_x",0), 0 );
+    if ( conf.hasValue( "pixel_offset_y" ) )
+        _pixelOffset = osg::Vec2s( _pixelOffset->x(), conf.value<short>("pixel_offset_y",0) );
 
     _image = conf.getNonSerializable<osg::Image>( "IconSymbol::image" );
 }
@@ -208,5 +217,11 @@ IconSymbol::parseSLD(const Config& c, Style& style)
     }
     else if ( match(c.key(), "icon-script") ) {
         style.getOrCreate<IconSymbol>()->script() = StringExpression(c.value());
+    }
+    else if ( match(c.key(), "text-offset-x") ) {
+        style.getOrCreate<IconSymbol>()->pixelOffset()->x() = as<double>(c.value(), defaults.pixelOffset()->x() );
+    }
+    else if ( match(c.key(), "text-offset-y") ) {
+        style.getOrCreate<IconSymbol>()->pixelOffset()->y() = as<double>(c.value(), defaults.pixelOffset()->y() );
     }
 }

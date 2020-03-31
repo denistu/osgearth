@@ -81,7 +81,11 @@ namespace osgEarth
         /** The camera altitude at which to start occlusion culling the icon */
         optional<double>& occlusionCullAltitude() { return _occlusionCullAltitude; }
         const optional<double>& occlusionCullAltitude() const { return _occlusionCullAltitude; }
-        
+
+        /** Pixel offset from the center point. */
+        optional<osg::Vec2s>& pixelOffset() { return _pixelOffset; }
+        const optional<osg::Vec2s>& pixelOffset() const { return _pixelOffset; }
+
     public: // non-serialized properties (for programmatic use only)
 
         /** Explicit image to use for 2D icon placemet */
@@ -103,6 +107,7 @@ namespace osgEarth
         mutable osg::ref_ptr<osg::Image> _image;
         optional<bool>                   _occlusionCull;
         optional<double>                 _occlusionCullAltitude;
+        optional<osg::Vec2s>             _pixelOffset;
     };
 
 } // namespace osgEarth
