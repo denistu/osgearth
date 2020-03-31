@@ -3033,7 +3033,7 @@ bool EarthManipulator::handleScrollGOTOAction(const EarthManipulator::Action &ac
                 Viewpoint here = getViewpoint();
                 here.focalPoint()->fromWorld(_srs.get(), point);
                 here.range() = here.range().get() * scrollFactor;
-                setViewpoint( here, duration );
+                setViewpoint( here, duration_s );
                 break;
             }
             default:
