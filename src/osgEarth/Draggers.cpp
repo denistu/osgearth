@@ -140,11 +140,17 @@ bool Dragger::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& 
 {
     if (ea.getHandled()) return false;
 
+    bool dragOnly = false;
+    if (_permittedModKeyMask >= 0) {
+        if ( ( _permittedModKeyMask & ea.getModKeyMask( ) ) == 0 )
+            dragOnly = true;
+    }
+
     osgViewer::View* view = dynamic_cast<osgViewer::View*>(&aa);
     if (!view) return false;
     if (!getMapNode()) return false;
 
-    if (ea.getEventType() == osgGA::GUIEventAdapter::PUSH)
+    if (ea.getEventType() == osgGA::GUIEventAdapter::PUSH && !dragOnly)
     {
         IntersectionPicker picker( view, this );
         IntersectionPicker::Hits hits;
@@ -227,7 +233,7 @@ bool Dragger::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& 
             return true;
         }
     }
-    else if (ea.getEventType() == osgGA::GUIEventAdapter::RELEASE)
+    else if (ea.getEventType() == osgGA::GUIEventAdapter::RELEASE && !dragOnly)
     {
         _elevationDragging = false;
 
@@ -239,7 +245,7 @@ bool Dragger::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& 
 
         aa.requestRedraw();
     }
-    else if (ea.getEventType() == osgGA::GUIEventAdapter::DRAG)
+    else if (ea.getEventType() == osgGA::GUIEventAdapter::DRAG && !dragOnly)
     {
         if (_elevationDragging) 
         {

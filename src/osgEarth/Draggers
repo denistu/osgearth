@@ -89,7 +89,11 @@ namespace osgEarth
         /** Minimum vertical distance for vertical dragging */
         void setVerticalMinimum(double min) { _verticalMinimum = min; }
         double getVerticalMinimim() const { return _verticalMinimum; }
-        
+
+        /** permitted modkey other key not permit move this dragger*/
+        void setPermittedModKeyMask(int mask) { _permittedModKeyMask = mask; }
+        int getPermittedModKeyMask() const { return _permittedModKeyMask; }
+
         /** Runs when the mouse intersects/hovers over the dragger */
         virtual void enter();
 
@@ -133,6 +137,7 @@ namespace osgEarth
         int _modKeyMask;
         DragMode _defaultMode;
         double _verticalMinimum;
+        int _permittedModKeyMask = -1;
     };
 
     /**********************************************************/
