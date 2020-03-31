@@ -187,8 +187,8 @@ EarthManipulator::Action::init()
     _dir =
         _type == ACTION_PAN_LEFT  || _type == ACTION_ROTATE_LEFT? DIR_LEFT :
         _type == ACTION_PAN_RIGHT || _type == ACTION_ROTATE_RIGHT? DIR_RIGHT :
-        _type == ACTION_PAN_UP    || _type == ACTION_ROTATE_UP   || _type == ACTION_ZOOM_IN ? DIR_UP :
-        _type == ACTION_PAN_DOWN  || _type == ACTION_ROTATE_DOWN || _type == ACTION_ZOOM_OUT ? DIR_DOWN :
+        _type == ACTION_PAN_UP    || _type == ACTION_ROTATE_UP   || _type == ACTION_ZOOM_IN  || _type == ACTION_ZOOM_IN_DRAG ? DIR_UP :
+        _type == ACTION_PAN_DOWN  || _type == ACTION_ROTATE_DOWN || _type == ACTION_ZOOM_OUT || _type == ACTION_ZOOM_OUT_DRAG ? DIR_DOWN :
         DIR_NA;
 }
 
@@ -1891,8 +1891,26 @@ EarthManipulator::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapt
                 resetMouse( aa );
                 addMouseEvent( ea );
                 action = _settings->getAction( ea.getEventType(), ea.getScrollingMotion(), ea.getModKeyMask() );
-                if ( handleScrollAction( action, action.getDoubleOption(OPTION_DURATION, 0.2) ) )
-                    aa.requestRedraw();
+                if (action._type == ActionType::ACTION_ZOOM_IN_DRAG || action._type == ActionType::ACTION_ZOOM_OUT_DRAG) {
+                    if (!isTethering()) {
+                        if ( handleScrollGOTOAction( action, ea.getX(), ea.getY(), aa.asView(), action.getDoubleOption(OPTION_DURATION, 0.2) ) )
+                            aa.requestRedraw();
+                    } else {
+                        aa.requestRedraw();
+                        if (action._type == ActionType::ACTION_ZOOM_IN_DRAG)
+                            action._type = ActionType::ACTION_ZOOM_IN;
+                        else
+                            action._type = ActionType::ACTION_ZOOM_OUT;
+
+                        if ( handleScrollAction( action, action.getDoubleOption(OPTION_DURATION, 0.2) ) )
+                            aa.requestRedraw();
+                    }
+                }
+                else
+                {
+                    if ( handleScrollAction( action, action.getDoubleOption(OPTION_DURATION, 0.2) ) )
+                        aa.requestRedraw();
+                }
                 handled = true;
                 break;
             default: break;
@@ -2983,6 +3001,46 @@ EarthManipulator::handleScrollAction( const Action& action, double duration )
     applyOptionsToDeltas( action, dx, dy );
 
     return handleAction( action, dx, dy, duration );
+}
+
+bool EarthManipulator::handleScrollGOTOAction(const EarthManipulator::Action &action, float mx, float my, osg::View *view, double duration_s)
+{
+    if (action._type == ACTION_NULL)
+        return true;
+    double scrollFactor = 1.;
+
+    switch( action._dir )
+    {
+    case DIR_UP:    scrollFactor = 1. - 0.5 * _settings->getScrollSensitivity(); break;
+    case DIR_DOWN:  scrollFactor = 1. + 0.5 * _settings->getScrollSensitivity(); break;
+    default: break;
+    }
+
+    if ( !recalculateCenterFromLookVector() )
+        return false;
+
+    osg::Vec2d toMouse = {mx - view->getCamera()->getViewport()->width() / 2., my - view->getCamera()->getViewport()->height() / 2.};
+    toMouse = toMouse * (1 - scrollFactor);
+    osg::Vec3d point;
+    if ( screenToWorld(view->getCamera()->getViewport()->width() / 2. + toMouse.x(),
+                       view->getCamera()->getViewport()->height() / 2. + toMouse.y(), view, point ))
+    {
+        switch( action._type )
+        {
+            case ACTION_ZOOM_IN_DRAG:
+            case ACTION_ZOOM_OUT_DRAG:
+            {
+                Viewpoint here = getViewpoint();
+                here.focalPoint()->fromWorld(_srs.get(), point);
+                here.range() = here.range().get() * scrollFactor;
+                setViewpoint( here, duration );
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    return true;
 }
 
 bool
