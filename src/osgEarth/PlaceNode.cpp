@@ -280,7 +280,10 @@ PlaceNode::compile()
                 break;
             }
         }
-
+        if (icon && icon->pixelOffset().isSet())
+        {
+            offset.set(offset.x() + icon->pixelOffset()->x(), offset.y() + icon->pixelOffset()->y());
+        }
         // Apply a rotation to the marker if requested:
         double heading = 0.0;
         if ( icon && icon->heading().isSet() )
