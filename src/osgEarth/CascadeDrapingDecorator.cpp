@@ -574,6 +574,7 @@ CascadeDrapingDecorator::CameraLocal::initialize(osg::Camera* camera, CascadeDra
     _rttSS->setAttributeAndModes(
         new osg::BlendFunc(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_ONE, GL_ONE_MINUS_SRC_ALPHA),
         forceOn);
+    _rttSS->setAttributeAndModes(new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
     // Cannot do this because it will break picking -gw
     //VirtualProgram* rttVP = VirtualProgram::getOrCreate(_rttSS.get());
