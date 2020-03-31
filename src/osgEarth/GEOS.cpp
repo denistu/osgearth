@@ -63,8 +63,11 @@ namespace
         {
             coords->push_back( coords->front() );
         }
+#if GEOS_VERSION_AT_LEAST(3,8)
+        geom::CoordinateSequence* seq = factory->create( coords ).get();
+#else
         geom::CoordinateSequence* seq = factory->create( coords );
-
+#endif
         return seq;
     }
 
@@ -141,7 +144,11 @@ namespace
                     if ( shell )
                     {
                         const Polygon* poly = static_cast<const Polygon*>(input);
+#if GEOS_VERSION_AT_LEAST(3,8)
+                        std::vector<geom::LinearRing*>* holes = poly->getHoles().size() > 0 ? new std::vector<geom::LinearRing*>() : 0L;
+#else
                         std::vector<geom::Geometry*>* holes = poly->getHoles().size() > 0 ? new std::vector<geom::Geometry*>() : 0L;
+#endif
                         if (holes)
                         {
                             for( RingCollection::const_iterator r = poly->getHoles().begin(); r != poly->getHoles().end(); ++r )
@@ -151,7 +158,13 @@ namespace
                                 {
                                     if (hole->getGeometryTypeId() == geos::geom::GEOS_LINEARRING)
                                     {
+#if GEOS_VERSION_AT_LEAST(3,8)
+                                        auto h = dynamic_cast<geom::LinearRing*>(hole);
+                                        if (h)
+                                            holes->push_back(h);
+#else
                                         holes->push_back(hole);
+#endif
                                     }
                                     else
                                     {
