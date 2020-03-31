@@ -64,6 +64,8 @@ namespace osgEarth { namespace Util
             ACTION_ZOOM,
             ACTION_ZOOM_IN,
             ACTION_ZOOM_OUT,
+            ACTION_ZOOM_IN_DRAG,
+            ACTION_ZOOM_OUT_DRAG,
             ACTION_EARTH_DRAG
         };
 
@@ -907,6 +909,7 @@ namespace osgEarth { namespace Util
         virtual bool handleMouseClickAction( const Action& action );
         virtual bool handleKeyboardAction( const Action& action, double duration_s = DBL_MAX );
         virtual bool handleScrollAction( const Action& action, double duration_s = DBL_MAX );
+        virtual bool handleScrollGOTOAction( const Action& action, float mx, float my, osg::View* view ,double duration_s = DBL_MAX );
         virtual bool handlePointAction( const Action& type, float mx, float my, osg::View* view );
         virtual void handleContinuousAction( const Action& action, osg::View* view );
         virtual void handleMovementAction( const ActionType& type, double dx, double dy, osg::View* view );
