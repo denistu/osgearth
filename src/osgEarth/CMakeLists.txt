@@ -418,6 +418,7 @@ SET(LIB_PUBLIC_HEADERS
     PlaceNode
     RectangleNode
     TrackNode
+    OsgGeometryOperator
 
     rtree.h
 
