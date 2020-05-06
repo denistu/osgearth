@@ -53,6 +53,7 @@ set(TARGET_GLSL
     ClipPlane.glsl
     DepthOffset.glsl
     Draping.glsl
+    DrawInstancedAttribute.glsl
     GPUClamping.glsl
     GPUClamping.lib.glsl
     Instancing.glsl
@@ -69,6 +70,7 @@ set(TARGET_GLSL
     ShadowCaster.glsl
     SimpleOceanLayer.glsl
     RTTPicker.glsl
+    WindLayer.CS.glsl
 )
 
 set(SHADERS_CPP "${CMAKE_CURRENT_BINARY_DIR}/AutoGenShaders.cpp")
@@ -148,6 +150,7 @@ SET(LIB_PUBLIC_HEADERS
     ImageMosaic
     ImageToHeightFieldConverter
     ImageUtils
+    InstanceBuilder
     InstanceCloud
     IntersectionPicker
     IOTypes
@@ -179,6 +182,7 @@ SET(LIB_PUBLIC_HEADERS
     ModelLayer
     ModelSource
     NativeProgramAdapter
+    NetworkMonitor
     NodeUtils
     Notify
     optional
@@ -419,11 +423,12 @@ SET(LIB_PUBLIC_HEADERS
     RectangleNode
     TrackNode
     OsgGeometryOperator
+    WindLayer
 
     rtree.h
 
     FileGDBFeatureSource
-    
+
     ${OSGEARTH_BUILDCONFIG_HEADER}
 )
 
@@ -519,6 +524,7 @@ set(TARGET_SRC
     ImageMosaic.cpp
     ImageToHeightFieldConverter.cpp
     ImageUtils.cpp
+    InstanceBuilder.cpp
     IntersectionPicker.cpp
     IOTypes.cpp
     JoinPointsLinesFilter.cpp
@@ -546,6 +552,7 @@ set(TARGET_SRC
     MimeTypes.cpp
     ModelLayer.cpp
     ModelSource.cpp
+    NetworkMonitor.cpp
     NodeUtils.cpp
     Notify.cpp
     ObjectIndex.cpp
@@ -759,6 +766,7 @@ set(TARGET_SRC
     ModelNode.cpp
     PlaceNode.cpp
     TrackNode.cpp
+    WindLayer.cpp
 
     FileGDBFeatureSource.cpp
 
@@ -771,7 +779,7 @@ IF(Protobuf_FOUND AND Protobuf_PROTOC_EXECUTABLE)
   ELSE()
     INCLUDE_DIRECTORIES(${Protobuf_INCLUDE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
   ENDIF()
-  
+
   PROTOBUF_GENERATE_CPP(PROTO_VECTOR_TILE_CPP PROTO_VECTOR_TILE_H vector_tile.proto)
   SET(LIB_PUBLIC_HEADERS
     ${LIB_PUBLIC_HEADERS}

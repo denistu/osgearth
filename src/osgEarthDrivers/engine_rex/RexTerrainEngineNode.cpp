@@ -156,8 +156,6 @@ RexTerrainEngineNode::RexTerrainEngineNode() :
         package.load(vp, package.ENGINE_SDK);
     }
 
-    // TODO: replace with a "renderer" object that can return statesets
-    // for different layer types, or something.
     _surfaceStateSet = new osg::StateSet();
     _surfaceStateSet->setName("Surface");
 
@@ -270,6 +268,7 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
     // live tiles of the current map revision so they can inrementally update
     // themselves if necessary.
     _liveTiles = new TileNodeRegistry("live");
+    _liveTiles->setFrameClock(&_clock);
     _liveTiles->setMapRevision(map->getDataModelRevision());
     _liveTiles->setNotifyNeighbors(options().normalizeEdges() == true);
     _liveTiles->setFirstLOD(options().firstLOD().get());
@@ -285,6 +284,7 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
 
     // Make a tile loader
     PagerLoader* loader = new PagerLoader( this );
+    loader->setFrameClock(&_clock);
     loader->setNumLODs(options().maxLOD().getOrUse(DEFAULT_MAX_LOD));
     loader->setMergesPerFrame(options().mergesPerFrame().get() );
     loader->setOverallPriorityScale(options().priorityScale().get());
@@ -303,6 +303,7 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
 
     // Make a tile unloader
     _unloader = new UnloaderGroup( _liveTiles.get() );
+    _unloader->setFrameClock(&_clock);
     _unloader->setCacheSize(expirationThreshold);
     _unloader->setMaxAge(options().minExpiryTime().get());
     _unloader->setMaxTilesToUnloadPerFrame(options().maxTilesToUnloadPerFrame().get());
@@ -311,8 +312,7 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
     this->addChild( _unloader.get() );
 
     // Tile rasterizer in case we need one
-    _rasterizer = new TileRasterizer();
-    this->addChild( _rasterizer );
+    //_rasterizer = new TileRasterizer();
 
     // Initialize the core render bindings.
     setupRenderBindings();
@@ -340,7 +340,8 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
         _liveTiles.get(),
         _renderBindings,
         options(),
-        _selectionInfo);
+        _selectionInfo,
+        &_clock);
 
     // Calculate the LOD morphing parameters:
     unsigned maxLOD = options().maxLOD().getOrUse(DEFAULT_MAX_LOD);
@@ -620,12 +621,7 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
 {
     OE_PROFILING_ZONE;
 
-    // Inform the registry of the current frame so that Tiles have access
-    // to the information.
-    //if (_liveTiles.valid() && nv.getFrameStamp())
-    //{
-    //    _liveTiles->setTraversalFrame(nv.getFrameStamp()->getFrameNumber());
-    //}
+    _clock.cull();
 
     osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>(&nv);
 
@@ -658,7 +654,8 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
     bool imageLayerStateSetPushed = false;
     int layersDrawn = 0;
 
-    osg::State::StateSetStack stateSetStack;
+    // LOOP over effectlayers..
+    // for each one, call culltraverse() on it to push a stateset;
 
     for (LayerDrawableList::iterator i = culler._terrain.layers().begin();
         i != culler._terrain.layers().end();
@@ -711,8 +708,9 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
                 }
             }
 
-            //OE_INFO << "   Apply: " << (lastLayer->_layer ? lastLayer->_layer->getName() : "-1") << "; tiles=" << lastLayer->_tiles.size() << std::endl;
-            //buf << (lastLayer->_layer ? lastLayer->_layer->getName() : "none") << " (" << lastLayer->_tiles.size() << ")\n";
+            // perform any pre-draw finalization
+            lastLayer->finalize();
+
 
             if (lastLayer->_layer)
             {
@@ -725,8 +723,6 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
 
             ++layersDrawn;
         }
-
-        //buf << (lastLayer->_layer ? lastLayer->_layer->getName() : "none") << " (" << lastLayer->_tiles.size() << ")\n";
     }
 
     // Uncomment this to see how many layers were drawn
@@ -770,9 +766,6 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
     _loader->accept(nv);
     _unloader->accept(nv);
     _releaser->accept(nv);
-
-    if (_rasterizer)
-        _rasterizer->accept(nv);
 }
 
 void
@@ -780,15 +773,15 @@ RexTerrainEngineNode::update_traverse(osg::NodeVisitor& nv)
 {
     OE_PROFILING_ZONE;
 
-    bool runUpdate = false;
-    if (nv.getFrameStamp())
-    {
-        runUpdate = (_frameLastUpdated < nv.getFrameStamp()->getFrameNumber());
-        _frameLastUpdated = nv.getFrameStamp()->getFrameNumber();
-    }
+    unsigned osgFrame = nv.getFrameStamp()->getFrameNumber();
+    bool newFrame = (osgFrame > _clock.getFrame());
 
-    if (runUpdate)
+    // prevent from running more than once per frame
+    if (newFrame)
     {
+        // advance the frame clock for this new frame.
+        _clock.update();
+
         if (_renderModelUpdateRequired)
         {
             PurgeOrphanedLayers visitor(getMap(), _renderBindings);
@@ -1061,9 +1054,6 @@ RexTerrainEngineNode::addTileLayer(Layer* tileLayer)
         {
             // Update the existing render models, and trigger a data reload.
             // Later we can limit the reload to an update of only the new data.
-            // TODO: replace with a tnr->invalidateRegion with a manifest containing the new layer
-            //UpdateRenderModels updateModels(getMap(), _renderBindings);
-            //_terrain->accept(updateModels);
             std::vector<const Layer*> layers;
             layers.push_back(tileLayer);
             invalidateRegion(layers, GeoExtent::INVALID, 0u, INT_MAX);
@@ -1170,7 +1160,7 @@ RexTerrainEngineNode::updateState()
 
         osg::StateSet* surfaceStateSet = getSurfaceStateSet();    // just the surface
 
-                                                                  // required for multipass tile rendering to work
+        // required for multipass tile rendering to work
         surfaceStateSet->setAttributeAndModes(
             new osg::Depth(osg::Depth::LEQUAL, 0, 1, true));
 

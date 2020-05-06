@@ -25,9 +25,10 @@
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/CameraUtils>
 #include <osgEarth/Shaders>
-#include <osgUtil/CullVisitor>
 #include <osgEarth/LineDrawable>
 #include <osgEarth/NodeUtils>
+#include <osgEarth/Registry>
+#include <osgEarth/Capabilities>
 #include <osg/BlendFunc>
 #include <osg/Multisample>
 #include <osg/Texture2D>
@@ -35,6 +36,7 @@
 #include <osg/Version>
 #include <osgDB/ReadFile>
 #include <osgDB/WriteFile>
+#include <osgUtil/CullVisitor>
 #include <osgUtil/Optimizer>
 #include <cstdlib> // getenv
 
@@ -43,22 +45,14 @@
 #define GCTEX_SAMPLER "oe_GroundCover_billboardTex"
 #define NOISE_SAMPLER "oe_GroundCover_noiseTex"
 
+#ifndef GL_MULTISAMPLE
+#define GL_MULTISAMPLE 0x809D
+#endif
+
 using namespace osgEarth::Splat;
 
 REGISTER_OSGEARTH_LAYER(groundcover, GroundCoverLayer);
 REGISTER_OSGEARTH_LAYER(splat_groundcover, GroundCoverLayer);
-
-// The TS/GS implementation uses GL_PATCHES to pass the terrain tile geometry
-// to the tessellation shader and then the geometry shader where it generates
-// billboards. Undef this to use a VS-only implementation (which is slower
-// and still needs some work with the colors, etc.) but could be useful if
-// GS are extremely slow or unavailable on your target platform.
-//#define USE_GEOMETRY_SHADER
-
-// If we're not using the GS, we have the option of using instancing or not.
-// OFF benchmarks faster on older cards. On newer cards (RTX 2070 e.g.)
-// it's slightly faster than using a giant DrawElementsUInt.
-#define USE_INSTANCING_IN_VERTEX_SHADER
 
 // Test instanced model substitution.
 // This works, but we need a compute or geometry shader or something to
@@ -74,9 +68,11 @@ GroundCoverLayer::Options::getConfig() const
     Config conf = PatchLayer::Options::getConfig();
     maskLayer().set(conf, "mask_layer");
     colorLayer().set(conf, "color_layer");
+    conf.set("color_min_saturation", colorMinSaturation());
     conf.set("lod", _lod);
     conf.set("cast_shadows", _castShadows);
-    conf.set("grass", grass());
+    conf.set("max_alpha", maxAlpha());
+    conf.set("alpha_to_coverage", alphaToCoverage());
 
     Config zones("zones");
     for (int i = 0; i < _zones.size(); ++i) {
@@ -92,13 +88,19 @@ GroundCoverLayer::Options::getConfig() const
 void
 GroundCoverLayer::Options::fromConfig(const Config& conf)
 {
-    _lod.init(13u);
-    _castShadows.init(false);
+    // defaults:
+    lod().init(13u);
+    castShadows().init(false);
+    maxAlpha().init(0.15f);
+    alphaToCoverage().init(true);
+
     maskLayer().get(conf, "mask_layer");
     colorLayer().get(conf, "color_layer");
+    conf.get("color_min_saturation", colorMinSaturation());
     conf.get("lod", _lod);
     conf.get("cast_shadows", _castShadows);
-    conf.get("grass", grass());
+    conf.get("max_alpha", maxAlpha());
+    conf.get("alpha_to_coverage", alphaToCoverage());
 
     const Config* zones = conf.child_ptr("zones");
     if (zones)
@@ -156,7 +158,7 @@ namespace
     {
         META_StateAttribute(osgEarth, GroundCoverSA, (osg::StateAttribute::Type)(osg::StateAttribute::CAPABILITY + 90210));
         GroundCover* _groundcover;
-        GroundCoverSA() { }
+        GroundCoverSA() : _groundcover(NULL) { }
         GroundCoverSA(const GroundCoverSA& sa, const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY) : osg::StateAttribute(sa, copyop), _groundcover(sa._groundcover) { }
         GroundCoverSA(GroundCover* gc) : _groundcover(gc) { }
         virtual int compare(const StateAttribute& sa) const { return 0; }
@@ -228,7 +230,7 @@ GroundCoverLayer::init()
 
     _zonesConfigured = false;
 
-    _useCoverageToAlpha = true;
+    _isModel = false;
 
     // deserialize zone data
     for (std::vector<ZoneOptions>::const_iterator i = options().zones().begin();
@@ -242,7 +244,7 @@ GroundCoverLayer::init()
     setAcceptCallback(new LayerAcceptor(this));
 
     setCullCallback(new ZoneSelector(this));
-    
+
 #ifndef USE_GEOMETRY_SHADER
     // this layer will do its own custom rendering
     _renderer = new Renderer(this);
@@ -257,11 +259,13 @@ GroundCoverLayer::init()
 Status
 GroundCoverLayer::openImplementation()
 {
-    Status parent = PatchLayer::openImplementation();
-    if (parent.isError())
-        return parent;
+    // GL version requirement
+    if (Registry::capabilities().getGLSLVersion() < 4.3f)
+    {
+        return Status(Status::ResourceUnavailable, "Requires GL 4.3+");
+    }
 
-    return Status::NoError;
+    return PatchLayer::openImplementation();
 }
 
 void
@@ -324,6 +328,30 @@ ImageLayer*
 GroundCoverLayer::getColorLayer() const
 {
     return options().colorLayer().getLayer();
+}
+
+void
+GroundCoverLayer::setMaxAlpha(float value)
+{
+    options().maxAlpha() = value;
+}
+
+float
+GroundCoverLayer::getMaxAlpha() const
+{
+    return options().maxAlpha().get();
+}
+
+void
+GroundCoverLayer::setUseAlphaToCoverage(bool value)
+{
+    options().alphaToCoverage() = value;
+}
+
+bool
+GroundCoverLayer::getUseAlphaToCoverage() const
+{
+    return options().alphaToCoverage().get();
 }
 
 void
@@ -429,7 +457,7 @@ namespace
 
             for(int j=0; j<biome->getObjects().size(); ++j)
             {
-				const GroundCoverObject* object = biome->getObjects()[j].get();
+                const GroundCoverObject* object = biome->getObjects()[j].get();
 
                 if (object->getType() == GroundCoverObject::TYPE_BILLBOARD)
                 {
@@ -463,7 +491,7 @@ GroundCoverLayer::buildStateSets()
         OE_DEBUG << LC << "buildStateSets deferred.. land cover dictionary not available\n";
         return;
     }
-    
+
     //if (!getLandCoverLayer()) {
     //    OE_DEBUG << LC << "buildStateSets deferred.. land cover layer not available\n";
     //    return;
@@ -491,29 +519,14 @@ GroundCoverLayer::buildStateSets()
     {
         stateset->setDefine("OE_GROUNDCOVER_COLOR_SAMPLER", getColorLayer()->getSharedTextureUniformName());
         stateset->setDefine("OE_GROUNDCOVER_COLOR_MATRIX", getColorLayer()->getSharedTextureMatrixUniformName());
+        stateset->addUniform(new osg::Uniform("oe_GroundCover_colorMinSaturation", options().colorMinSaturation().get()));
     }
 
     // disable backface culling to support shadow/depth cameras,
     // for which the geometry shader renders cross hatches instead of billboards.
     stateset->setMode(GL_CULL_FACE, osg::StateAttribute::PROTECTED);
 
-    stateset->setAttributeAndModes(
-        new osg::BlendFunc(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO),
-        osg::StateAttribute::OVERRIDE);
-
-    // uniform that communicates the availability of multisampling.
-    if (osg::DisplaySettings::instance()->getMultiSamples())
-    {
-        stateset->setDefine("OE_GROUNDCOVER_HAS_MULTISAMPLES");
-
-        // enable alpha-to-coverage multisampling for vegetation.
-        if (_useCoverageToAlpha)
-        {
-            stateset->setMode(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB, 1);
-        }
-    }
-
-    float maxRange = 0.0f;
+    float maxRangeAcrossZones = getMaxVisibleRange();
 
     for (Zones::iterator z = _zones.begin(); z != _zones.end(); ++z)
     {
@@ -524,39 +537,28 @@ GroundCoverLayer::buildStateSets()
             if (!groundCover->getBiomes().empty() || groundCover->getTotalNumObjects() > 0)
             {
                 osg::StateSet* zoneStateSet = groundCover->getOrCreateStateSet();
-                            
+
+                float maxDistance = osg::minimum(
+                    getMaxVisibleRange(),
+                    groundCover->getMaxDistance());
+
+                zoneStateSet->addUniform(new osg::Uniform("oe_GroundCover_maxDistance", maxDistance));
+
+                maxRangeAcrossZones = osg::maximum(maxRangeAcrossZones, maxDistance);
+
+                zoneStateSet->addUniform(new osg::Uniform("oe_GroundCover_maxAlpha", getMaxAlpha()));
+
+                if (osg::DisplaySettings::instance()->getNumMultiSamples() > 1)
+                {
+                    zoneStateSet->setMode(GL_MULTISAMPLE, 1);
+                }
+
+                // TEMP. If we have models, use them instead
+                _isModel = groundCover->getTotalNumModels() > 0;
+
                 // Install the land cover shaders on the state set
                 VirtualProgram* vp = VirtualProgram::getOrCreate(zoneStateSet);
                 vp->setName("Ground cover (" + groundCover->getName() + ")");
-
-                // Generate the coverage acceptor shader
-#ifdef USE_GEOMETRY_SHADER
-                shaders.load(vp, shaders.GroundCover_TCS, getReadOptions());
-                shaders.load(vp, shaders.GroundCover_TES, getReadOptions());
-                shaders.load(vp, shaders.GroundCover_GS, getReadOptions());
-
-                osg::Shader* covTest = groundCover->createPredicateShader(_landCoverDict.get(), _landCoverLayer.get());
-                covTest->setName(covTest->getName() + "_GEOMETRY");
-                covTest->setType(osg::Shader::GEOMETRY);
-                vp->setShader(covTest);
-
-                // If you define OE_GROUNDCOVER_COVERAGE_PRECHECK in the TCS, you'll need this:
-                //osg::Shader* covTest2 = groundCover->createPredicateShader(_landCoverDict.get(), _landCoverLayer.get());
-                //covTest->setName(covTest->getName() + "_TESSCONTROL");
-                //covTest2->setType(osg::Shader::TESSCONTROL);
-                //vp->setShader(covTest2);
-
-                osg::ref_ptr<osg::Shader> layerShader = groundCover->createShader();
-                if (!layerShader.valid())
-                {
-                    setStatus(Status::ConfigurationError, "No GroundCover objects available");
-                    setDrawCallback(NULL);
-                    return;
-                }
-
-                layerShader->setType(osg::Shader::GEOMETRY);
-                vp->setShader(layerShader.get());
-#else
 
                 loadShaders(vp, getReadOptions());
 
@@ -564,6 +566,9 @@ GroundCoverLayer::buildStateSets()
                 covTest->setName(covTest->getName() + "_VERTEX");
                 covTest->setType(osg::Shader::VERTEX);
                 vp->setShader(covTest);
+
+                // for compute:
+                _renderer->_computeProgram->addShader(new osg::Shader(osg::Shader::COMPUTE, covTest->getShaderSource()));
 
                 osg::ref_ptr<osg::Shader> layerShader = groundCover->createShader();
                 if (!layerShader.valid())
@@ -575,13 +580,8 @@ GroundCoverLayer::buildStateSets()
                 layerShader->setType(osg::Shader::VERTEX);
                 vp->setShader(layerShader.get());
 
-                //zoneStateSet->setDefine("OE_GROUNDCOVER_NUM_INSTANCES", "132");
-
-#ifdef USE_INSTANCING_IN_VERTEX_SHADER
-                zoneStateSet->setDefine("OE_GROUNDCOVER_USE_INSTANCING");
-#endif
-
-#endif
+                // for compute:                
+                _renderer->_computeProgram->addShader(new osg::Shader(osg::Shader::COMPUTE, layerShader->getShaderSource()));
 
                 // whether to support top-down image billboards. We disable it when not in use
                 // for performance reasons.
@@ -597,11 +597,6 @@ GroundCoverLayer::buildStateSets()
                 zoneStateSet->setTextureAttribute(_groundCoverTexBinding.unit(), tex);
                 zoneStateSet->addUniform(new osg::Uniform(GCTEX_SAMPLER, _groundCoverTexBinding.unit()));
 
-                if (groundCover->getMaxDistance() > maxRange)
-                {
-                    maxRange = groundCover->getMaxDistance();
-                }
-
                 zoneStateSet->setAttribute(new GroundCoverSA(groundCover));
             }
             else
@@ -616,11 +611,8 @@ GroundCoverLayer::buildStateSets()
         }
     }
 
-    if (maxRange > 0.0f)
-    {
-        setMaxVisibleRange(maxRange);
-        OE_INFO << LC << "Max visible range set to " << maxRange << std::endl;
-    }
+    setMaxVisibleRange(maxRangeAcrossZones);
+    OE_INFO << LC << "Max visible range set to " << maxRangeAcrossZones << std::endl;
 }
 
 void
@@ -646,7 +638,9 @@ GroundCoverLayer::releaseGLObjects(osg::State* state) const
     }
 
     if (_renderer.valid())
+    {
         _renderer->releaseGLObjects(state);
+    }
 
     PatchLayer::releaseGLObjects(state);
 }
@@ -679,11 +673,12 @@ namespace
 
         return geode;
     }
-    
+
     osg::Geometry* makeShape()
     {
         osg::Geometry* geom = new osg::Geometry();
         geom->setUseVertexBufferObjects(true);
+        geom->setUseDisplayList(false);
 
         const float s=10;
 
@@ -718,11 +713,18 @@ namespace
 
     osg::Geometry* loadShape()
     {
-        osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile("D:/data/models/rockinsoil/RockSoil.3DS.osg");
-        osg::ref_ptr<osg::Geometry> geom = osgEarth::findTopMostNodeOfType<osg::Geometry>(node.get());
-        node = NULL;
-        if (!geom.valid()) OE_WARN << "ASDLAKSDJALSKDJALSKJASLKDJ" << std::endl;
-        return geom.release();
+        //osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile("D:/data/models/rockinsoil/RockSoil.3DS.osg");
+        osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile("D:/data/models/OakTree/redoak.osgb");
+        
+        InstanceCloud::ModelCruncher cruncher;
+        cruncher.add(node.get());
+        cruncher.finalize();
+        
+        return cruncher._geom.release();
+
+        //osg::ref_ptr<osg::Geometry> geom = osgEarth::findTopMostNodeOfType<osg::Geometry>(node.get());
+        //node = NULL;
+        //return geom.release();
     }
 }
 
@@ -731,141 +733,48 @@ GroundCoverLayer::createNodeImplementation(const DrawContext& dc)
 {
     osg::Node* node = NULL;
     if (_debug)
-        node = makeBBox(dc._geom->getBoundingBox(), *dc._key);
+        node = makeBBox(*dc._geomBBox, *dc._key);
     return node;
 }
 
 osg::Geometry*
-GroundCoverLayer::createGeometry(unsigned vboTileDim) const    
+GroundCoverLayer::createGeometry() const    
 {
-    unsigned numInstances = vboTileDim * vboTileDim;
-    const unsigned vertsPerInstance = 8;
-    const unsigned indiciesPerInstance = 12;
+    osg::Geometry* out_geom = NULL;
 
-    osg::Geometry* out_geom = new osg::Geometry();
-    out_geom->setUseVertexBufferObjects(true);
-
-#ifdef TEST_MODEL_INSTANCING
-    out_geom = makeShape();
-    //out_geom = loadShape();
-    out_geom->getPrimitiveSet(0)->setNumInstances(numInstances);
-    return out_geom;
-#endif
-
-#ifdef USE_INSTANCING_IN_VERTEX_SHADER
-
-    static const GLubyte indices[12] = { 0,1,2,2,1,3, 4,5,6,6,5,7 };
-    out_geom->addPrimitiveSet(new osg::DrawElementsUByte(GL_TRIANGLES, 12, &indices[0], numInstances));
-
-    // We don't actually need any verts. Is it OK not to set an array?
-    //geom->setVertexArray(new osg::Vec3Array(8));
-
-    osg::Vec3Array* normals = new osg::Vec3Array(osg::Array::BIND_OVERALL);
-    normals->push_back(osg::Vec3f(0,0,1));
-    out_geom->setNormalArray(normals);
-
-#else // big giant drawelements:
-
-    // Do we need this at all?
-    unsigned int numverts = numInstances * vertsPerInstance;
-    osg::Vec3Array* coords = new osg::Vec3Array(numverts);
-    out_geom->setVertexArray(coords);
-
-    osg::Vec3Array* normals = new osg::Vec3Array(osg::Array::BIND_OVERALL);
-    normals->push_back(osg::Vec3f(0, 0, 1));
-    out_geom->setNormalArray(normals);
-
-    osg::DrawElements* de =
-        numverts > 0xFFFF ? (osg::DrawElements*)new osg::DrawElementsUInt(GL_TRIANGLES)
-        : (osg::DrawElements*)new osg::DrawElementsUShort(GL_TRIANGLES);
-
-    const unsigned totalIndicies = numInstances * indiciesPerInstance;
-    de->reserveElements(totalIndicies);
-
-    for (unsigned i = 0; i < numInstances; ++i)
+    if (_isModel)
     {
-        unsigned offset = i * vertsPerInstance;
-
-        de->addElement(0 + offset);
-        de->addElement(1 + offset);
-        de->addElement(2 + offset);
-        de->addElement(2 + offset);
-        de->addElement(1 + offset);
-        de->addElement(3 + offset);
-
-        de->addElement(4 + offset);
-        de->addElement(5 + offset);
-        de->addElement(6 + offset);
-        de->addElement(6 + offset);
-        de->addElement(5 + offset);
-        de->addElement(7 + offset);
-
-        if (false) //settings->_grass) // third crosshatch
-        {
-            de->addElement(8 + offset);
-            de->addElement(9 + offset);
-            de->addElement(10 + offset);
-            de->addElement(10 + offset);
-            de->addElement(9 + offset);
-            de->addElement(11 + offset);
-        }
+        out_geom = loadShape();
+        out_geom->setUseVertexBufferObjects(true);
+        out_geom->setUseDisplayList(false);
+        return out_geom;
     }
+    else
+    {
+        const unsigned vertsPerInstance = 8;
+        const unsigned indiciesPerInstance = 12;
 
-    out_geom->addPrimitiveSet(de);
+        osg::Geometry* out_geom = new osg::Geometry();
+        out_geom->setUseVertexBufferObjects(true);
 
-#endif // USE_INSTANCING_IN_VERTEX_SHADER
+        static const GLushort indices[12] = { 0,1,2,2,1,3, 4,5,6,6,5,7 };
+        out_geom->addPrimitiveSet(new osg::DrawElementsUShort(GL_TRIANGLES, 12, &indices[0]));
 
-    return out_geom;
+        return out_geom;
+    }
 }
 
 //........................................................................
 
 // only used with non-GS implementation
-GroundCoverLayer::Renderer::DrawState::DrawState()
+GroundCoverLayer::Renderer::UniformState::UniformState()
 {
     // initialize all the uniform locations - we will fetch these at draw time
     // when the program is active
-    _pcp = NULL;
-    _numInstancesUL = -1;
-    _LLUL = -1;
-    _URUL = -1;
-    _LLNormalUL = -1;
-    _URNormalUL = -1;
-    _instancedModelUL = -1;
-    _tilesDrawnThisFrame = 0;
+    _computeDataUL = -1;
+    _A2CUL = -1;
+    _tileCounter = 0;
     _numInstances1D = 0;
-}
-
-void
-GroundCoverLayer::Renderer::DrawState::reset(const osg::State* state, Settings* settings)
-{
-    _tilesDrawnThisFrame = 0;
-    _LLAppliedValue.set(FLT_MAX, FLT_MAX, FLT_MAX);
-    _URAppliedValue.set(FLT_MAX, FLT_MAX, FLT_MAX);
-
-    // Check for initialization in this zone:
-    const GroundCover* groundcover = GroundCoverSA::extract(state)->_groundcover;
-    osg::ref_ptr<osg::Geometry>& geom = _geom[groundcover];
-
-    if (!geom.valid())
-    {
-        if (groundcover->options().spacing().isSet())
-        {
-            float spacing_m = groundcover->options().spacing().get();
-            _numInstances1D = settings->_tileWidth / spacing_m;
-        }
-        else if (groundcover->options().density().isSet())
-        {
-            float density_sqkm = groundcover->options().density().get();
-            _numInstances1D = 0.001 * settings->_tileWidth * sqrt(density_sqkm);
-        }
-        else
-        {
-            _numInstances1D = 128;
-        }
-
-        geom = _renderer->_layer->createGeometry(_numInstances1D);
-    }
 }
 
 GroundCoverLayer::Renderer::Renderer(GroundCoverLayer* layer)
@@ -873,118 +782,92 @@ GroundCoverLayer::Renderer::Renderer(GroundCoverLayer* layer)
     _layer = layer;
 
     // create uniform IDs for each of our uniforms
-    _numInstancesUName = osg::Uniform::getNameID("oe_GroundCover_numInstances");
-    _LLUName = osg::Uniform::getNameID("oe_GroundCover_LL");
-    _URUName = osg::Uniform::getNameID("oe_GroundCover_UR");
-    _instancedModelUName = osg::Uniform::getNameID("oe_GroundCover_instancedModel");
+    _A2CName = osg::Uniform::getNameID("oe_GroundCover_A2C");
+    _computeDataUName = osg::Uniform::getNameID("oe_tile");
 
-    _drawStateBuffer.resize(64u);
+    _drawStateBuffer.resize(256u);
 
     _settings._tileWidth = 0.0;
-    //_settings._grass = false;
+
+    _a2cBlending = new osg::BlendFunc(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
+
+    // Load our compute shader
+    GroundCoverShaders shaders;
+    std::string source = ShaderLoader::load(shaders.GroundCover_CS, shaders, layer->getReadOptions());
+    _computeStateSet = new osg::StateSet();
+    osg::Shader* s = new osg::Shader(osg::Shader::COMPUTE, source);
+    _computeProgram = new osg::Program();
+    _computeProgram->addShader(s);
+    _computeStateSet->setAttribute(_computeProgram, osg::StateAttribute::ON);
+
+    _counter = 0;
 }
 
 void
-GroundCoverLayer::Renderer::preDraw(osg::RenderInfo& ri, osg::ref_ptr<osg::Referenced>& data)
+GroundCoverLayer::Renderer::draw(osg::RenderInfo& ri, const PatchLayer::TileBatch* tiles)
 {
     DrawState& ds = _drawStateBuffer[ri.getContextID()];
     ds._renderer = this;
-
-    ds.reset(ri.getState(), &_settings);
+    osg::State* state = ri.getState();
 
 #if OSG_VERSION_GREATER_OR_EQUAL(3,5,6)
     // Need to unbind any VAO since we'll be doing straight GL calls
     //ri.getState()->unbindVertexArrayObject();
 #endif
 
-    // Testing - need this for glMultiDrawElementsIndirect
-    //osg::PrimitiveSet* de = ds._geom->getPrimitiveSet(0);
-    //osg::GLBufferObject* ebo = de->getOrCreateGLBufferObject(ri.getContextID());
-    //ri.getState()->bindElementBufferObject(ebo);
-}
-
-namespace
-{
-    struct DrawElementsIndirectCommand {
-        GLuint  count;
-        GLuint  instanceCount;
-        GLuint  firstIndex;
-        GLuint  baseVertex;
-        GLuint  baseInstance;
-    };
-}
-
-void
-GroundCoverLayer::Renderer::draw(osg::RenderInfo& ri, const DrawContext& tile, osg::Referenced* data)
-{
-    DrawState& ds = _drawStateBuffer[ri.getContextID()];
-    osg::GLExtensions* ext = osg::GLExtensions::Get(ri.getContextID(), true);
-
-    // find the uniform location for our uniforms if necessary.
-    // (only necessary when the PCP has changed)
-    const osg::Program::PerContextProgram* pcp = ri.getState()->getLastAppliedProgramObject();
-    if (pcp != ds._pcp || ds._numInstancesUL < 0)
-    {
-        if (pcp == NULL)
-        {
-            //OE_WARN << "[GroundCoverLayer] ILLEGAL STATE - getLastAppliedProgramObject == NULL. Contact support." << std::endl;
-            return;
-        }
-        ds._numInstancesUL = pcp->getUniformLocation(_numInstancesUName);
-        ds._LLUL = pcp->getUniformLocation(_LLUName);
-        ds._URUL = pcp->getUniformLocation(_URUName);
-        ds._instancedModelUL = pcp->getUniformLocation(_instancedModelUName);
-
-        ds._pcp = pcp;
-    }
-
-    // on the first draw call this frame, initialize the uniform that tells the
-    // shader the total number of instances:
-    if (ds._tilesDrawnThisFrame == 0)
-    {
-        osg::Vec2f numInstances(ds._numInstances1D, ds._numInstances1D);
-        ext->glUniform2fv(ds._numInstancesUL, 1, numInstances.ptr());
-
-#ifdef TEST_MODEL_INSTANCING
-        const int useInstancedModel = 1;
-#else
-        const int useInstancedModel = 0;
-#endif
-        ext->glUniform1i(ds._instancedModelUL, useInstancedModel);
-    }
-
-    // transmit the extents of this tile to the shader, skipping the glUniform
-    // call if the values have not changed. The shader will calculate the
-    // instance positions by interpolating across the tile extents.
-    const osg::BoundingBox& bbox = tile._geom->getBoundingBox();
-
-    const osg::Vec3f& LL = bbox.corner(0);
-    const osg::Vec3f& UR = bbox.corner(3);
-
-    if (LL != ds._LLAppliedValue)
-    {
-        ext->glUniform3fv(ds._LLUL, 1, LL.ptr());
-        ds._LLAppliedValue = LL;
-    }
-
-    if (UR != ds._URAppliedValue)
-    {
-        ext->glUniform3fv(ds._URUL, 1, UR.ptr());
-        ds._URAppliedValue = UR;
-    }
-
+    // Push the pre-gen culling shader and run it:
     const GroundCoverSA* sa = GroundCoverSA::extract(ri.getState());
-    osg::ref_ptr<osg::Geometry>& geom = ds._geom[sa->_groundcover];
+    osg::ref_ptr<InstanceCloud>& instancer = ds._instancers[sa->_groundcover];
+    if (!instancer.valid())
+    {
+        instancer = new InstanceCloud();
+    }
 
-    // draw the instanced billboard geometry:
-    geom->draw(ri);
+    // Only run the compute shader when the tile batch has changed:
+    bool needsCompute = false;
+    if (ds._lastTileBatchID != tiles->getBatchID())
+    {
+        ds._lastTileBatchID = tiles->getBatchID();
+        needsCompute = true;
+    }
 
-    ++ds._tilesDrawnThisFrame;
-}
+    if (needsCompute)
+    {
+        // I'm not sure why we have to push the layer's stateset here.
+        // It should have bee applied already in the render bin.
+        // I am missing something. -gw 4/20/20
+        
+        state->pushStateSet(_layer->getStateSet());
 
-void
-GroundCoverLayer::Renderer::postDraw(osg::RenderInfo& ri, osg::Referenced* data)
-{
+        // First pass: render with compute shader
+        state->apply(_computeStateSet.get());
+        applyLocalState(ri, ds);
+
+        instancer->allocateGLObjects(ri, tiles->size());
+        instancer->preCull(ri);
+        _pass = 0;
+        tiles->drawTiles(ri);
+        instancer->postCull(ri);
+
+        // restore previous program
+        state->apply();
+
+        // rendering pass:
+        applyLocalState(ri, ds);
+        _pass = 1;
+        tiles->drawTiles(ri);
+
+        state->popStateSet();
+    }
+
+    else
+    {
+        applyLocalState(ri, ds);
+        _pass = 1;
+        tiles->drawTiles(ri);
+    }
+
+    // Clean up and finish
 #if OSG_VERSION_GREATER_OR_EQUAL(3,5,6)
     // Need to unbind our VAO so as not to confuse OSG
     ri.getState()->unbindVertexArrayObject();
@@ -995,23 +878,115 @@ GroundCoverLayer::Renderer::postDraw(osg::RenderInfo& ri, osg::Referenced* data)
 }
 
 void
+GroundCoverLayer::Renderer::applyLocalState(osg::RenderInfo& ri, DrawState& ds)
+{
+    const osg::Program::PerContextProgram* pcp = ri.getState()->getLastAppliedProgramObject();
+    if (!pcp)
+        return;
+
+    osg::GLExtensions* ext = osg::GLExtensions::Get(ri.getContextID(), true);
+
+    UniformState& u = ds._uniforms[pcp];
+
+    if (u._computeDataUL < 0)
+    {
+        u._computeDataUL = pcp->getUniformLocation(_computeDataUName);
+        u._A2CUL = pcp->getUniformLocation(_A2CName);
+    }
+
+    u._tileCounter = 0;
+
+    // Check for initialization in this zone:
+    const GroundCover* groundcover = GroundCoverSA::extract(ri.getState())->_groundcover;
+    osg::ref_ptr<InstanceCloud>& instancer = ds._instancers[groundcover];
+
+    if (!instancer->getGeometry() || u._numInstances1D == 0)
+    {
+        if (groundcover->options().spacing().isSet())
+        {
+            float spacing_m = groundcover->options().spacing().get();
+            u._numInstances1D = _settings._tileWidth / spacing_m;
+            _spacing = spacing_m;
+        }
+        else if (groundcover->options().density().isSet())
+        {
+            float density_sqkm = groundcover->options().density().get();
+            u._numInstances1D = 0.001 * _settings._tileWidth * sqrt(density_sqkm);
+        }
+        else
+        {
+            u._numInstances1D = 128;
+        }
+
+        //OE_WARN << "Num Instances = " << u._numInstances1D*u._numInstances1D << std::endl;
+
+        if (instancer->getGeometry() == NULL)
+        {
+            instancer->setGeometry(_layer->createGeometry());
+            instancer->setNumInstances(u._numInstances1D, u._numInstances1D);
+
+            // TODO: review this. I don't like it but have no good reason. -gw
+            // This is here to integrate the model's texture atlas into the stateset
+            if (instancer->_geom->getStateSet())
+                _layer->getOrCreateStateSet()->merge(*instancer->_geom->getStateSet());
+        }
+    }
+
+    GLint multiSamplesOn = ri.getState()->getLastAppliedMode(GL_MULTISAMPLE) ? 1 : 0;
+    ri.getState()->applyMode(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB, multiSamplesOn == 1);
+    ri.getState()->applyAttribute(_a2cBlending.get());
+
+    if (u._A2CUL >= 0)
+    {
+        ext->glUniform1i(u._A2CUL, multiSamplesOn);
+    }
+}
+
+void
+GroundCoverLayer::Renderer::drawTile(osg::RenderInfo& ri, const PatchLayer::DrawContext& tile)
+{
+    const GroundCoverSA* sa = GroundCoverSA::extract(ri.getState());
+    DrawState& ds = _drawStateBuffer[ri.getContextID()];
+    osg::ref_ptr<InstanceCloud>& instancer = ds._instancers[sa->_groundcover];
+    const osg::Program::PerContextProgram* pcp = ri.getState()->getLastAppliedProgramObject();
+    if (!pcp)
+        return;
+
+    UniformState& u = ds._uniforms[pcp];
+
+    if (_pass == 0) // COMPUTE shader
+    {
+        osg::GLExtensions* ext = osg::GLExtensions::Get(ri.getContextID(), true);
+
+        if (u._computeDataUL >= 0)
+        {
+            u._computeData[0] = tile._tileBBox->xMin();
+            u._computeData[1] = tile._tileBBox->yMin();
+            u._computeData[2] = tile._tileBBox->xMax();
+            u._computeData[3] = tile._tileBBox->yMax();
+
+            u._computeData[4] = (float)u._tileCounter;
+
+            // TODO: check whether this changed before calling it
+            ext->glUniform1fv(u._computeDataUL, 5, &u._computeData[0]);
+
+            instancer->cullTile(ri, u._tileCounter);
+        }
+    }
+
+    else // DRAW shader
+    {
+        // check valid flag
+        instancer->drawTile(ri, u._tileCounter);
+    }
+
+    ++u._tileCounter;
+}
+
+void
 GroundCoverLayer::Renderer::resizeGLObjectBuffers(unsigned maxSize)
 {
     _drawStateBuffer.resize(osg::maximum(maxSize, _drawStateBuffer.size()));
-
-    for (unsigned i = 0; i < _drawStateBuffer.size(); ++i)
-    {
-        const DrawState& ds = _drawStateBuffer[i];
-        for (DrawState::GeomPerGroundCover::const_iterator j = ds._geom.begin();
-            j != ds._geom.end();
-            ++j)
-        {
-            if (j->second.valid())
-            {
-                j->second->resizeGLObjectBuffers(maxSize);
-            }
-        }
-    }
 }
 
 void
@@ -1020,8 +995,8 @@ GroundCoverLayer::Renderer::releaseGLObjects(osg::State* state) const
     for(unsigned i=0; i<_drawStateBuffer.size(); ++i)
     {
         const DrawState& ds = _drawStateBuffer[i];
-        for(DrawState::GeomPerGroundCover::const_iterator j = ds._geom.begin();
-            j != ds._geom.end();
+        for(DrawState::InstancerPerGroundCover::const_iterator j = ds._instancers.begin();
+            j != ds._instancers.end();
             ++j)
         {
             if (j->second.valid())
@@ -1029,6 +1004,8 @@ GroundCoverLayer::Renderer::releaseGLObjects(osg::State* state) const
                 j->second->releaseGLObjects(state);
             }
         }
+
+        
     }
 }
 
@@ -1036,6 +1013,13 @@ void
 GroundCoverLayer::loadShaders(VirtualProgram* vp, const osgDB::Options* options) const
 {
     GroundCoverShaders shaders;
-    shaders.load(vp, shaders.GroundCover_VS, options);
-    shaders.load(vp, shaders.GroundCover_FS, options);
+
+    if (_isModel)
+    {
+        shaders.load(vp, shaders.GroundCover_Model, options);
+    }
+    else // billboards
+    {
+        shaders.load(vp, shaders.GroundCover_Billboard, options);
+    }
 }

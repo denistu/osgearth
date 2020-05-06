@@ -50,23 +50,26 @@ public:
         _mapNode(mapNode),
         _earthManip(earthManip),
         _view(view)
-    {        
+    {
     }
 
 protected:
     void drawUi() override
     {
         // ImGui code goes here...
-        //ImGui::ShowDemoWindow();        
+        //ImGui::ShowDemoWindow();
         _layers.draw(_mapNode.get(), _view->getCamera(), _earthManip.get());
         _search.draw(_earthManip.get());
+        _networkMonitor.draw();
     }
 
     osg::ref_ptr< MapNode > _mapNode;
     osg::ref_ptr<EarthManipulator> _earthManip;
-    osg::ref_ptr<osgViewer::View> _view;
+    osgViewer::View* _view;
     LayersGUI _layers;
-    SearchGUI _search;        
+    SearchGUI _search;
+    NetworkMonitorGUI _networkMonitor;
+
 };
 
 int
@@ -111,12 +114,12 @@ main(int argc, char** argv)
     viewer.getCamera()->setNearFarRatio(0.0001);
 
     // Setup the viewer for imgui
-    viewer.setRealizeOperation(new GlewInitOperation);
+    viewer.setRealizeOperation(new ImGuiDemo::RealizeOperation);
 
     viewer.realize();
 
     // load an earth file, and support all or our example command-line options
-    // and earth file <external> tags    
+    // and earth file <external> tags
     osg::Node* node = MapNodeHelper().load(arguments, &viewer);
     if (node)
     {

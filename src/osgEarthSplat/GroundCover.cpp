@@ -53,15 +53,15 @@ GroundCoverBiomeOptions::getConfig() const
 //........................................................................
 
 GroundCoverOptions::GroundCoverOptions(const ConfigOptions& co) :
-ConfigOptions(co),
-_lod(14),
-_maxDistance(1000.0f),
-_density(1.0f),
-_spacing(25.0f),
-_fill(1.0f),
-_wind(0.0f),
-_brightness(1.0f),
-_contrast(0.5f)
+    ConfigOptions(co),
+    //_lod(14),
+    _maxDistance(FLT_MAX),//1000.0f),
+    _density(1.0f),
+    _spacing(25.0f),
+    _fill(1.0f),
+    _wind(0.0f),
+    _brightness(1.0f),
+    _contrast(0.5f)
 {
     fromConfig(_conf);
 }
@@ -72,7 +72,6 @@ GroundCoverOptions::getConfig() const
     Config conf = ConfigOptions::getConfig();
     conf.key() = "groundcover";
     conf.set("name", _name);
-    conf.set("lod", _lod);
     conf.set("max_distance", _maxDistance);
     conf.set("density", _density);
     conf.set("spacing", _spacing);
@@ -94,7 +93,6 @@ void
 GroundCoverOptions::fromConfig(const Config& conf)
 {
     conf.get("name", _name);
-    conf.get("lod", _lod);
     conf.get("max_distance", _maxDistance);
     conf.get("density", _density);
     conf.get("spacing", _spacing);
@@ -114,7 +112,7 @@ GroundCoverOptions::fromConfig(const Config& conf)
 //............................................................................
 
 GroundCover::GroundCover(const GroundCoverOptions& in) :
-_options(in)
+    _options(in)
 {
     //nop
 }
@@ -158,6 +156,21 @@ GroundCover::getTotalNumObjects() const
     }
     return count;
 }
+int
+GroundCover::getTotalNumModels() const
+{
+    int count = 0;
+    for(int i=0; i<_biomes.size(); ++i)
+    {
+        for(int j=0; j<_biomes[i]->getObjects().size(); ++j)
+        {
+            const GroundCoverObject* obj = _biomes[i]->getObjects()[j].get();
+            if (obj->getType() == GroundCoverObject::TYPE_MODEL)
+                ++count;
+        }
+    }
+    return count;
+}
 
 osg::StateSet*
 GroundCover::getOrCreateStateSet()
@@ -167,7 +180,6 @@ GroundCover::getOrCreateStateSet()
         _stateSet = new osg::StateSet();
 
         _stateSet->addUniform(new osg::Uniform("oe_GroundCover_wind", options().wind().get()));
-        _stateSet->addUniform(new osg::Uniform("oe_GroundCover_maxDistance", options().maxDistance().get()));
     }
 
     return _stateSet.get();
@@ -217,7 +229,7 @@ GroundCover::createShader() const
         "    float sizeVariation; \n"
         "}; \n"
         "const oe_GroundCover_Billboard oe_GroundCover_billboards[%NUM_BILLBOARDS%] = oe_GroundCover_Billboard[%NUM_BILLBOARDS%](\n";
-    
+
     objectsBuf <<
         "struct oe_GroundCover_Object { \n"
         "    int type; // 0=billboard \n"
@@ -239,7 +251,7 @@ GroundCover::createShader() const
         const GroundCoverBiome* biome = getBiomes()[i].get();
 
         float maxWidth = 0.0f, maxHeight = 0.0f;
-        
+
         int firstObjectIndexOfBiome = totalNumObjectsInserted;
 
         // This will be larger than biome->getObjects().size() IF any of the
@@ -248,7 +260,7 @@ GroundCover::createShader() const
 
         for(int j=0; j<biome->getObjects().size(); ++j)
         {
-			const GroundCoverObject* object = biome->getObjects()[j].get();
+            const GroundCoverObject* object = biome->getObjects()[j].get();
 
             if (object->getType() == GroundCoverObject::TYPE_BILLBOARD)
             {
@@ -366,13 +378,13 @@ GroundCover::createShader() const
         << "} \n";
 
     objectsBuf
-        << "void oe_GroundCover_getObject(in int index, out oe_GroundCover_Object output) { \n"
-        << "    output = oe_GroundCover_objects[index]; \n"
+        << "void oe_GroundCover_getObject(in int index, out oe_GroundCover_Object object) { \n"
+        << "    object = oe_GroundCover_objects[index]; \n"
         << "} \n";
-        
+
     billboardsBuf
-        << "void oe_GroundCover_getBillboard(in int index, out oe_GroundCover_Billboard output) { \n"
-        << "    output = oe_GroundCover_billboards[index]; \n"
+        << "void oe_GroundCover_getBillboard(in int index, out oe_GroundCover_Billboard billboard) { \n"
+        << "    billboard = oe_GroundCover_billboards[index]; \n"
         << "} \n";
 
     std::string biomeStr = biomeBuf.str();
@@ -382,7 +394,7 @@ GroundCover::createShader() const
 
     std::string objectsStr = objectsBuf.str();
     replaceIn(objectsStr, "%NUM_OBJECTS%", Stringify() << totalNumObjectsInserted); //getTotalNumObjects());
-    
+
     osg::ref_ptr<ImageLayer> layer;
 
     osg::Shader* shader = new osg::Shader();
@@ -439,18 +451,7 @@ GroundCover::createPredicateShader(LandCoverDictionary* landCoverDict, LandCover
     //}
     else
     {
-#if 0
-        const std::string& sampler = layer->getSharedTextureUniformName());
-        const std::string& matrix  = layer->getSharedTextureMatrixUniformName());
-        buf << "uniform sampler2D " << sampler << ";\n"
-            << "uniform mat4 " << matrix << ";\n"
-            << "int oe_GroundCover_getBiomeIndex(in vec4 coords) { \n"
-            << "    float value = textureLod(" << sampler << ", (" << matrix << " * coords).st, 0).r;\n";
-#else
-        buf << "float oe_LandCover_coverage; \n"
-            << "int oe_GroundCover_getBiomeIndex(in vec4 coords) { \n"
-            << "    float value = oe_LandCover_coverage; \n";
-#endif
+        buf << "int oe_GroundCover_getBiomeIndex(in float code) { \n";
 
         for(int biomeIndex=0; biomeIndex<getBiomes().size(); ++biomeIndex)
         {
@@ -466,7 +467,7 @@ GroundCover::createPredicateShader(LandCoverDictionary* landCoverDict, LandCover
                     const LandCoverClass* lcClass = landCoverDict->getClassByName(classes[i]);
                     if (lcClass)
                     {
-                        buf << "    if (value == " << lcClass->getValue() << ") return " << biomeIndex << "; \n";
+                        buf << "    if (code == " << lcClass->getValue() << ") return " << biomeIndex << "; \n";
                     }
                     else
                     {
@@ -478,7 +479,7 @@ GroundCover::createPredicateShader(LandCoverDictionary* landCoverDict, LandCover
         buf << "    return -1; \n";
         buf << "}\n";
     }
-    
+
     osg::Shader* shader = new osg::Shader();
     shader->setName("oe GroundCover predicate function");
     shader->setShaderSource( buf.str() );
@@ -513,7 +514,7 @@ GroundCover::createTexture() const
     typedef std::vector<osg::Image*> ImageVector;
     ImageSet uniqueImages;
     ImageVector imagesToAdd;
-    
+
 
     for(int b=0; b<getBiomes().size(); ++b)
     {
@@ -531,7 +532,7 @@ GroundCover::createTexture() const
                     imagesToAdd.push_back(bb->_sideImage.get());
                     uniqueImages.insert(bb->_sideImage.get());
                 }
-            
+
                 if (bb->_topImage.valid() && uniqueImages.find(bb->_topImage.get()) == uniqueImages.end())
                 {
                     imagesToAdd.push_back(bb->_topImage.get());
@@ -540,7 +541,7 @@ GroundCover::createTexture() const
             }
         }
     }
-    
+
     for(unsigned i=0; i<imagesToAdd.size(); ++i)
     {
         osg::Image* image = imagesToAdd[i];
@@ -651,7 +652,8 @@ GroundCoverBiome::configure(const ConfigOptions& conf, const osgDB::Options* dbo
             if (!sideImage.valid())
             {
                 OE_WARN << LC << "A billboard is missing the mandatory image" << std::endl;
-                return false;
+                //return false;
+                sideImage = new osg::Image();
             }
 
             // Next process the top image (optional)
@@ -693,7 +695,16 @@ GroundCoverBiome::configure(const ConfigOptions& conf, const osgDB::Options* dbo
             {
                 getObjects().push_back( new GroundCoverBillboard(sideImage.get(), topImage.get(), bs) );
             }
+
+            continue;
         } 
+
+        const ModelSymbol* model = dynamic_cast<const ModelSymbol*>(i->get());
+        if (model)
+        {
+            osg::ref_ptr<osg::Node> node = URI(model->url()->evalURI()).getNode(dbo);
+            getObjects().push_back(new GroundCoverModel(node.release()));
+        }
     }
 
     if ( getObjects().size() == 0 )

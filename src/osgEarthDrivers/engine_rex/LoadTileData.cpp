@@ -68,8 +68,6 @@ LoadTileData::run(ProgressCallback* progress)
 
     // if the operation was canceled, set the request to abandoned
     // so it can potentially retry later.
-    // TODO: Consider the canceler setting some kind of retry delay
-    // for failed network attempts
     if (progress && progress->isCanceled())
     {
         _dataModel = 0L;
@@ -86,9 +84,7 @@ LoadTileData::run(ProgressCallback* progress)
         _enableCancel? progress : 0L);
 
     // if the operation was canceled, set the request to abandoned
-    // so it can potentially retry later. 
-    // TODO: Consider the canceler setting some kind of retry delay
-    // for failed network attempts
+    // so it can potentially retry later.
     if (progress && progress->isCanceled())
     {
         _dataModel = 0L;
@@ -110,7 +106,7 @@ LoadTileData::run(ProgressCallback* progress)
 
 // apply() runs in the update traversal and can safely alter the scene graph
 bool
-LoadTileData::merge(const osg::FrameStamp* stamp)
+LoadTileData::merge()
 {
     // context went out of scope - bail
     osg::ref_ptr<EngineContext> context;

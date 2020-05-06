@@ -257,6 +257,7 @@ public:
         accessor.byteOffset = 0;
         accessor.componentType = data->getDataType();
         accessor.count = data->getNumElements();
+        accessor.normalized = data->getNormalize();
 
         const osg::DrawArrays* da = dynamic_cast<const osg::DrawArrays*>(pset);
         if (da)
@@ -410,9 +411,11 @@ public:
                     roughnessFactor.has_number_value = true;
                     mat.values["roughnessFactor"] = roughnessFactor;
 
-					if (stateSet->getMode(GL_BLEND) & osg::StateAttribute::ON) {
-						mat.alphaMode = "BLEND";
-					}
+                    mat.doubleSided = ((stateSet->getMode(GL_CULL_FACE) & osg::StateAttribute::ON) == 0);
+
+                    if (stateSet->getMode(GL_BLEND) & osg::StateAttribute::ON) {
+                        mat.alphaMode = "BLEND";
+                    }
                     
                     _model.materials.push_back(mat);
                     return index;
