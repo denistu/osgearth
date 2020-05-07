@@ -22,6 +22,7 @@
 #include <osgEarth/Layer>
 #include <osgEarth/TerrainResources>
 #include <osgEarth/Units>
+#include <osgEarth/GLUtils>
 
 namespace osgEarth
 {
