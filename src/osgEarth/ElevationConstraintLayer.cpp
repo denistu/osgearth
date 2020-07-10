@@ -1,6 +1,6 @@
 /* -*-c++-*- */
 /* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -201,7 +201,7 @@ ElevationConstraintLayer::createImageImplementationAux(const TileKey& key, Progr
         UnorderedSet<TileKey> featureKeys;
         for (int i = 0; i < intersectingKeys.size(); ++i)
         {
-            if (intersectingKeys[i].getLOD() > featureProfile->getMaxLevel())
+            if ((int)intersectingKeys[i].getLOD() > featureProfile->getMaxLevel())
                 featureKeys.insert(intersectingKeys[i].createAncestorKey(featureProfile->getMaxLevel()));
             else
                 featureKeys.insert(intersectingKeys[i]);

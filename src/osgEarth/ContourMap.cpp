@@ -72,7 +72,7 @@ ContourMapLayer::setTransferFunction(osg::TransferFunction1D* xfer)
     _xferMin->set(_xfer->getMinimum());
     _xferRange->set(_xfer->getMaximum() - _xfer->getMinimum());
 
-    OE_WARN << "min=" << _xfer->getMinimum() << ", range=" << (_xfer->getMaximum()-_xfer->getMinimum()) << std::endl;
+    //OE_WARN << "min=" << _xfer->getMinimum() << ", range=" << (_xfer->getMaximum()-_xfer->getMinimum()) << std::endl;
 }
 
 void
@@ -133,6 +133,7 @@ ContourMapLayer::init()
         xfer->setColor(-1.0000 * s, osg::Vec4f(0, 0, 0.5, 1), false);
         xfer->setColor(-0.2500 * s, osg::Vec4f(0, 0, 1, 1), false);
         xfer->setColor(0.0000 * s, osg::Vec4f(0, .5, 1, 1), false);
+        xfer->setColor(0.0010 * s, Color("#C2B280FF"), false);
         xfer->setColor(0.0062 * s, osg::Vec4f(.84, .84, .25, 1), false);
         xfer->setColor(0.1250 * s, osg::Vec4f(.125, .62, 0, 1), false);
         xfer->setColor(0.3250 * s, osg::Vec4f(.80, .70, .47, 1), false);

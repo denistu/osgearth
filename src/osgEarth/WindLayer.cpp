@@ -157,6 +157,7 @@ namespace
     }
 
     WindDrawable::WindDrawable(const osgDB::Options* readOptions)
+        : _cameraState(OE_MUTEX_NAME)
     {
         // Always run the shader.
         setCullingActive(false);
@@ -423,7 +424,7 @@ void
 WindLayer::Options::fromConfig(const Config& conf)
 {
     ortho().setDefault(true);
-    radius().setDefault(75.0f);
+    radius().setDefault(Distance(75.0, Units::METERS));
     winds().clear();
 
     conf.get("ortho", ortho());
@@ -442,22 +443,29 @@ void
 WindLayer::addWind(Wind* wind)
 {
     WindDrawable* wd = static_cast<WindDrawable*>(_drawable.get());
-    wd->_winds.push_back(wind);
+    if (wd)
+    {
+       wd->_winds.push_back(wind);
+    }
+
 }
 
 void
 WindLayer::removeWind(Wind* wind)
 {
     WindDrawable* wd = static_cast<WindDrawable*>(_drawable.get());
-    for(std::vector<osg::ref_ptr<Wind> >::iterator i = wd->_winds.begin();
-        i != wd->_winds.end();
-        ++i)
+    if (wd)
     {
-        if (i->get() == wind)
-        {
-            wd->_winds.erase(i);
-            break;
-        }
+       for (std::vector<osg::ref_ptr<Wind> >::iterator i = wd->_winds.begin();
+          i != wd->_winds.end();
+          ++i)
+       {
+          if (i->get() == wind)
+          {
+             wd->_winds.erase(i);
+             break;
+          }
+       }
     }
 }
 

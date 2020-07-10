@@ -1,6 +1,6 @@
 /* -*-c++-*- */
 /* osgEarth - Geospatial SDK for OpenSceneGraph
- * Copyright 2018 Pelican Mapping
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,14 +18,16 @@
  */
 
 #include <osgEarth/NetworkMonitor>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
+#include <osgDB/fstream>
+#include <iomanip>
 
 using namespace osgEarth;
 
 namespace
 {
     static NetworkMonitor::Requests s_requests;
-    osgEarth::Threading::ReadWriteMutex s_requestsMutex;
+    osgEarth::Threading::ReadWriteMutex s_requestsMutex("NetworkMonitor(OE)");
     static unsigned long s_requestId = 0;
     static bool s_enabled = false;
     static std::map<unsigned int, std::string> s_requestLayer;
@@ -86,6 +88,41 @@ void NetworkMonitor::clear()
 {
     osgEarth::Threading::ScopedWriteLock lock(s_requestsMutex);
     s_requests.clear();
+}
+
+void NetworkMonitor::saveCSV(Requests& requests, const std::string& filename)
+{
+    std::ofstream out(filename.c_str());
+    out << "URI, Duration, Start, End, Layer, Type, Status" << std::endl;
+
+    if (!requests.empty())
+    {
+        out << std::fixed << std::setprecision(2);
+        double startTime = requests.begin()->second.startTime;
+        for (Requests::iterator itr = requests.begin(); itr != requests.end(); ++itr)
+        {
+            double startMS = osg::Timer::instance()->delta_m(startTime, itr->second.startTime);
+            double endMS = 0.0;
+            if (itr->second.isComplete)
+            {
+                endMS = osg::Timer::instance()->delta_m(startTime, itr->second.endTime);
+            }
+            else
+            {
+                endMS = osg::Timer::instance()->delta_m(startTime, osg::Timer::instance()->tick());
+            }
+
+            out << itr->second.uri << ", "
+                << itr->second.getDuration() << ", "
+                << startMS << ", "
+                << endMS << ", "
+                << itr->second.layer << ", "
+                << itr->second.type << ", "
+                << itr->second.status
+                << std::endl;
+        }
+    }
+    out.close();
 }
 
 void NetworkMonitor::setRequestLayer(const std::string& name)

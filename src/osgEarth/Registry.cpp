@@ -20,15 +20,14 @@
 #include <osgEarth/Capabilities>
 #include <osgEarth/Cube>
 #include <osgEarth/ShaderFactory>
-#include <osgEarth/TaskService>
-#include <osgEarth/TerrainEngineNode>
 #include <osgEarth/ObjectIndex>
-#include <osgEarth/Async>
+#include <osgEarth/HTTPClient>
+#include <osgEarth/TerrainEngineNode>
 
 #include <osgText/Font>
+#include <osgDB/Registry>
 
 #include <gdal_priv.h>
-
 #include <ogr_api.h>
 #include <cstdlib>
 
@@ -57,18 +56,19 @@ namespace
 }
 
 Registry::Registry() :
-osg::Referenced     ( true ),
-_gdal_registered    ( false ),
-_numGdalMutexGets   ( 0 ),
 _uidGen             ( 0 ),
 _caps               ( 0L ),
 _defaultFont        ( 0L ),
 _terrainEngineDriver( "rex" ),
 _cacheDriver        ( "filesystem" ),
 _overrideCachePolicyInitialized( false ),
-_threadPoolSize(2u),
 _devicePixelRatio(1.0f),
-_maxVertsPerDrawable(USHRT_MAX)
+_maxVertsPerDrawable(USHRT_MAX),
+_regMutex("Registry(OE)"),
+_activityMutex("Reg.Activity(OE)"),
+_capsMutex("Reg.Caps(OE)"),
+_srsCache("Reg.SRSCache(OE)"),
+_blacklist("Reg.BlackList(OE)")
 {
     // set up GDAL and OGR.
     OGRRegisterAll();
@@ -94,9 +94,6 @@ _maxVertsPerDrawable(USHRT_MAX)
     // shader generator used internally by osgEarth. Can be replaced.
     _shaderGen = new ShaderGenerator();
 
-    // thread pool for general use
-    _taskServiceManager = new TaskServiceManager();
-
     // optimizes sharing of state attributes and state sets for
     // performance boost
     _stateSetCache = new StateSetCache();
@@ -108,7 +105,9 @@ _maxVertsPerDrawable(USHRT_MAX)
     _objectIndex = new ObjectIndex();
 
     // activate KMZ support
-    osgDB::Registry::instance()->addArchiveExtension  ( "kmz" );
+    osgDB::Registry::instance()->addArchiveExtension( "kmz" );
+    osgDB::Registry::instance()->addArchiveExtension( "3tz");
+    osgDB::Registry::instance()->addFileExtensionAlias( "3tz", "zip" );
     //osgDB::Registry::instance()->addFileExtensionAlias( "kmz", "kml" );
 
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "application/vnd.google-earth.kml+xml", "kml" );
@@ -173,6 +172,12 @@ _maxVertsPerDrawable(USHRT_MAX)
             _maxVertsPerDrawable = 65536;
     }
 
+    // use the GDAL global mutex?
+    if (getenv("OSGEARTH_DISABLE_GDAL_MUTEX"))
+    {
+        getGDALMutex().disable();
+    }
+
     // register the system stock Units.
     Units::registerAll( this );
 }
@@ -180,9 +185,6 @@ _maxVertsPerDrawable(USHRT_MAX)
 Registry::~Registry()
 {
     OE_DEBUG << LC << "Registry shutting down...\n";
-    _srsCache.lock();
-    _srsCache.clear();
-    _srsCache.unlock();
     _global_geodetic_profile = 0L;
     _spherical_mercator_profile = 0L;
     _cube_profile = 0L;
@@ -192,6 +194,16 @@ Registry::~Registry()
     CPLPopErrorHandler();
 }
 
+static osg::ref_ptr<Registry> s_registry = NULL;
+
+// Destroy the registry explicitly: this is called in an atexit() hook.  See comment in
+// Registry::instance(bool reset).
+void destroyRegistry()
+{
+   s_registry->release();
+   s_registry = NULL;
+}
+
 Registry*
 Registry::instance(bool reset)
 {
@@ -199,7 +211,18 @@ Registry::instance(bool reset)
     // This is to prevent crash on exit where the gdal mutex is deleted before the registry is.
     osgEarth::getGDALMutex();
 
-    static osg::ref_ptr<Registry> s_registry = new Registry;
+    static bool s_registryInit = false;
+
+    // Create registry the first time through, explicitly rather than depending on static object
+    // initialization order, which is undefined in c++ across separate compilation units.  An
+    // explicit hook is registered to tear it down on exit.  atexit() hooks are run on exit in
+    // the reverse order of their registration during setup.
+    if (!s_registryInit)
+    {
+        s_registryInit = true;
+        s_registry = new Registry;
+        atexit(destroyRegistry);
+    }
 
     if (reset)
     {
@@ -238,18 +261,16 @@ Registry::release()
     }
 
     // SpatialReference cache
-    _srsCache.lock();
     _srsCache.clear();
-    _srsCache.unlock();
 
     // Shared object index
     if (_objectIndex.valid())
         _objectIndex = new ObjectIndex();
 }
 
-OpenThreads::ReentrantMutex& osgEarth::getGDALMutex()
+Threading::RecursiveMutex& osgEarth::getGDALMutex()
 {
-    static OpenThreads::ReentrantMutex _gdal_mutex;
+    static osgEarth::Threading::RecursiveMutex _gdal_mutex("GDAL Mutex");
     return _gdal_mutex;
 }
 
@@ -319,18 +340,13 @@ Registry::getNamedProfile( const std::string& name ) const
 osg::ref_ptr<SpatialReference>
 Registry::getOrCreateSRS(const SpatialReference::Key& key)
 {
-    _srsCache.lock();
-
+    ScopedMutexLock lock(_srsCache);
     osg::ref_ptr<SpatialReference>& srs = _srsCache[key];
     if (!srs.valid())
     {
-        srs = SpatialReference::create(key);
+        srs = SpatialReference::createFromKey(key);
     }
-    osg::ref_ptr<SpatialReference> result = srs.get();
-
-    _srsCache.unlock();
-
-    return result;
+    return srs;
 }
 
 void
@@ -590,9 +606,7 @@ Registry::getDefaultFont()
 UID
 Registry::createUID()
 {
-    //todo: use OpenThreads::Atomic for this
-    ScopedLock<Mutex> exclusive( _uidGenMutex );
-    return (UID)( _uidGen++ );
+    return _uidGen++;
 }
 
 const osgDB::Options*
@@ -614,15 +628,14 @@ Registry::cloneOrCreateOptions(const osgDB::Options* input)
 void
 Registry::registerUnits( const Units* units )
 {
-    Threading::ScopedWriteLock exclusive( _unitsVectorMutex );
+    Threading::ScopedMutexLock lock(_regMutex);
     _unitsVector.push_back(units);
 }
 
 const Units*
 Registry::getUnits(const std::string& name) const
 {
-    Threading::ScopedReadLock shared( _unitsVectorMutex );
-
+    Threading::ScopedMutexLock lock(_regMutex);
     std::string lower = toLower(name);
     for( UnitsVector::const_iterator i = _unitsVector.begin(); i != _unitsVector.end(); ++i )
     {
@@ -680,7 +693,7 @@ Registry::startActivity(const std::string& activity)
 
 void
 Registry::startActivity(const std::string& activity,
-                        const std::string& value)
+    const std::string& value)
 {
     Threading::ScopedMutexLock lock(_activityMutex);
     _activities.erase(Activity(activity,std::string()));
@@ -779,12 +792,6 @@ Registry::getMaxNumberOfVertsPerDrawable() const
     return _maxVertsPerDrawable;
 }
 
-AsyncMemoryManager*
-Registry::getAsyncMemoryManager() const
-{
-    return _asyncMemoryManager.get();
-}
-
 namespace
 {
     //Simple class used to add a file extension alias for the earth_tile to the earth plugin
@@ -793,10 +800,10 @@ namespace
     public:
         RegisterEarthTileExtension()
         {
-    #if OSG_VERSION_LESS_THAN(3,5,4)
+#if OSG_VERSION_LESS_THAN(3,5,4)
             // Method deprecated beyone 3.5.4 since all ref counting is thread-safe by default
             osg::Referenced::setThreadSafeReferenceCounting( true );
-    #endif
+#endif
             osgDB::Registry::instance()->addFileExtensionAlias("earth_tile", "earth");
         }
     };

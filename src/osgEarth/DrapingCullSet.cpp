@@ -1,6 +1,6 @@
 /* -*-c++-*- */
 /* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -27,6 +27,13 @@
 using namespace osgEarth;
 using namespace osgEarth::Util;
 
+
+DrapingManager::DrapingManager() :
+    _sets(OE_MUTEX_NAME),
+    _renderBinNum(1)
+{
+    //nop
+}
 
 DrapingCullSet&
 DrapingManager::get(const osg::Camera* cam)

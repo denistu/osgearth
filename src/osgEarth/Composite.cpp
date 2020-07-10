@@ -67,7 +67,7 @@ namespace osgEarth { namespace Composite
         TileKey bestAvailableKey;
         //bool mayHaveData;
         float opacity;
-        osg::ref_ptr< osg::Image> image;
+        osg::ref_ptr<const osg::Image> image;
     };
 
     // some helper types.    
@@ -699,7 +699,7 @@ CompositeElevationLayer::createHeightFieldImplementation(const TileKey& key, Pro
     heightField->getFloatArray()->assign(size*size, NO_DATA_VALUE);
 
     // Populate the heightfield and return it if it's valid
-    if (_layers.populateHeightFieldAndNormalMap(heightField.get(), 0L, key, 0, INTERP_BILINEAR, progress))
+    if (_layers.populateHeightField(heightField.get(), NULL, key, 0, INTERP_BILINEAR, progress))
     {                
         return GeoHeightField(heightField.release(), key.getExtent());
     }

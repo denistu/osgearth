@@ -59,7 +59,6 @@ MBTiles::Options::writeTo(Config& conf) const
 {
     conf.set("filename", _url);
     conf.set("format", _format);
-    conf.set("compute_levels", _computeLevels);
     conf.set("compress", _compress);
 }
 
@@ -67,13 +66,11 @@ void
 MBTiles::Options::readFrom(const Config& conf)
 {
     format().init("png");
-    computeLevels().init(false);
     compress().init(false);
 
     conf.get("filename", _url);
     conf.get("url", _url); // compat for consistency with other drivers
     conf.get("format", _format);
-    conf.get("compute_levels", _computeLevels);
     conf.get("compress", _compress);
 }
 
@@ -100,7 +97,6 @@ REGISTER_OSGEARTH_LAYER(mbtilesimage, MBTilesImageLayer);
 OE_LAYER_PROPERTY_IMPL(MBTilesImageLayer, URI, URL, url);
 OE_LAYER_PROPERTY_IMPL(MBTilesImageLayer, std::string, Format, format);
 OE_LAYER_PROPERTY_IMPL(MBTilesImageLayer, bool, Compress, compress);
-OE_LAYER_PROPERTY_IMPL(MBTilesImageLayer, bool, ComputeLevels, computeLevels);
 
 void
 MBTilesImageLayer::init()
@@ -204,7 +200,6 @@ REGISTER_OSGEARTH_LAYER(mbtileselevation, MBTilesElevationLayer);
 OE_LAYER_PROPERTY_IMPL(MBTilesElevationLayer, URI, URL, url);
 OE_LAYER_PROPERTY_IMPL(MBTilesElevationLayer, std::string, Format, format);
 OE_LAYER_PROPERTY_IMPL(MBTilesElevationLayer, bool, Compress, compress);
-OE_LAYER_PROPERTY_IMPL(MBTilesElevationLayer, bool, ComputeLevels, computeLevels);
 
 void
 MBTilesElevationLayer::init()
@@ -308,12 +303,14 @@ MBTilesElevationLayer::writeHeightFieldImplementation(const TileKey& key, const 
 #undef LC
 #define LC "[MBTiles] Layer \"" << _name << "\" "
 
-MBTiles::Driver::Driver()
+MBTiles::Driver::Driver() :
+    _minLevel(0),
+    _maxLevel(19),
+    _forceRGB(false),
+    _database(NULL),
+    _mutex("MBTiles Driver(OE)")
 {
-    _minLevel = 0;
-    _maxLevel = 20;
-    _forceRGB = false;
-    _database = NULL;
+    //nop
 }
 
 Status
@@ -405,15 +402,17 @@ MBTiles::Driver::open(
                 OE_INFO << LC << "Data will be compressed (zlib)" << std::endl;
             }
         }
+
+        // initialize and update as we write tiles.
+        _minLevel = 0u;
+        _maxLevel = 0u;
     }
 
     // If the database pre-existed, read in the information from the metadata.
     else // !isNewDatabase
     {
-        if (options.computeLevels() == true)
-        {
-            computeLevels();
-        }
+        computeLevels();
+        OE_INFO << LC << "Got levels from database " << _minLevel << ", " << _maxLevel << std::endl;
 
         std::string profileStr;
         getMetaData("profile", profileStr);
@@ -554,6 +553,38 @@ MBTiles::Driver::open(
     return Status::OK();
 }
 
+int
+MBTiles::Driver::readMaxLevel()
+{
+    int result = -1;
+
+    sqlite3* database = (sqlite3*)_database;
+
+    //Get the image
+    sqlite3_stmt* select = NULL;
+    std::string query = "SELECT zoom_level FROM tiles ORDER BY zoom_level DESC LIMIT 1";
+    int rc = sqlite3_prepare_v2( database, query.c_str(), -1, &select, 0L );
+    if ( rc != SQLITE_OK )
+    {
+        OE_WARN << LC << "Failed to prepare SQL: " << query << "; " << sqlite3_errmsg(database) << std::endl;
+        return ReadResult::RESULT_READER_ERROR;
+    }
+
+    rc = sqlite3_step( select );
+    if (rc == SQLITE_ROW)
+    {
+        result = sqlite3_column_int(select, 0);
+    }
+    else
+    {
+        OE_DEBUG << LC << "SQL QUERY failed for " << query << ": " << std::endl;
+        return -1;
+    }
+
+    sqlite3_finalize( select );
+    return result;
+}
+
 ReadResult
 MBTiles::Driver::read(
     const TileKey& key,
@@ -648,7 +679,7 @@ Status
 MBTiles::Driver::write(
     const TileKey& key,
     const osg::Image* image,
-    ProgressCallback* progress) const
+    ProgressCallback* progress)
 {
     if (!key.valid() || !image)
         return Status::AssertionFailure;
@@ -735,6 +766,18 @@ MBTiles::Driver::write(
 
     sqlite3_finalize(insert);
 
+    // adjust the max level if necessary
+    if (key.getLOD() > _maxLevel)
+    {
+        _maxLevel = key.getLOD();
+        //putMetaData("maxlevel", Stringify()<<_maxLevel);
+    }
+    if (key.getLOD() < _minLevel)
+    {
+        _minLevel = key.getLOD();
+        //putMetaData("minlevel", Stringify()<<_minLevel);
+    }
+
     return Status::NoError;
 }
 
@@ -820,7 +863,8 @@ MBTiles::Driver::computeLevels()
     sqlite3* database = (sqlite3*)_database;
     osg::Timer_t startTime = osg::Timer::instance()->tick();
     sqlite3_stmt* select = NULL;
-    std::string query = "SELECT min(zoom_level), max(zoom_level) from tiles";
+    // Get min and max as separate queries to allow the SQLite query planner to convert it to a fast equivalent.
+    std::string query = "SELECT (SELECT min(zoom_level) FROM tiles), (SELECT max(zoom_level) FROM tiles); ";
     int rc = sqlite3_prepare_v2( database, query.c_str(), -1, &select, 0L );
     if ( rc != SQLITE_OK )
     {
@@ -852,7 +896,7 @@ MBTiles::Driver::createTables()
 
     std::string query =
         "CREATE TABLE IF NOT EXISTS metadata ("
-        " name  text,"
+        " name text PRIMARY KEY,"
         " value text)";
 
     if (SQLITE_OK != sqlite3_exec(database, query.c_str(), 0L, 0L, 0L))
@@ -908,7 +952,8 @@ MBTiles::Driver::setDataExtents(const DataExtentList& values)
         }
 
         // Convert the bounds to wgs84
-        GeoExtent bounds = e.transform(osgEarth::SpatialReference::get("wgs84"));
+        osg::ref_ptr<const Profile> gg = Profile::create("global-geodetic");
+        GeoExtent bounds = gg->clampAndTransformExtent(e);
         std::stringstream boundsStr;
         boundsStr << bounds.xMin() << "," << bounds.yMin() << "," << bounds.xMax() << "," << bounds.yMax();
         putMetaData("bounds", boundsStr.str());

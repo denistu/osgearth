@@ -25,7 +25,7 @@
 #include <osgEarth/Profile>
 #include <osgEarth/MapCallback>
 #include <osgEarth/Revisioning>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 #include <osgEarth/ElevationPool>
 #include <osgDB/Options>
 
@@ -210,6 +210,7 @@ namespace osgEarth
         Revision _dataModelRevision;
         osg::ref_ptr<osgDB::Options> _readOptions;
         osg::ref_ptr<ElevationPool> _elevationPool;
+        mutable ElevationPool _ElevationPool;
 
         struct LayerCB : public LayerCallback {
             LayerCB(Map*);

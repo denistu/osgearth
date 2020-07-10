@@ -98,7 +98,7 @@ _maxAngle_deg ( 180.0 ),
 _geoInterp    ( GEOINTERP_RHUMB_LINE ),
 _maxPolyTilingAngle_deg( 45.0f ),
 _optimizeVertexOrdering( false ),
-_maximumCreaseAngle( 0.0f )
+_maximumCreaseAngle(Angle(0.0, Units::DEGREES))
 {
     //nop
 }
@@ -643,7 +643,7 @@ BuildGeometryFilter::processPoints(FeatureList& features, FilterContext& context
             PointDrawable* drawable = new PointDrawable();
 
             drawable->importVertexArray(allPoints.get());
-            
+
             if (point->size().isSet())
                 drawable->setPointSize(point->size().get());
 
@@ -664,7 +664,7 @@ BuildGeometryFilter::processPoints(FeatureList& features, FilterContext& context
             }
 
             // assign the color:
-            drawable->setColor(primaryColor);            
+            drawable->setColor(primaryColor);
 
             // embed the feature name if requested. Warning: blocks geometry merge optimization!
             if ( _featureNameExpr.isSet() )
@@ -941,7 +941,7 @@ BuildGeometryFilter::tileAndBuildPolygon(Geometry*               ring,
                                          osg::Geometry*          osgGeom,
                                          const osg::Matrixd      &world2local)
 {
-    if (ring==NULL || featureSRS==NULL || outputSRS==NULL)
+    if (ring==NULL)
         return;
 
 #define MAX_POINTS_PER_CROP_TILE 1024

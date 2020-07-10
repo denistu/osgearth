@@ -1,6 +1,6 @@
 /* -*-c++-*- */
 /* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -319,16 +319,14 @@ CascadeDrapingDecorator::reserveTextureImageUnit()
 {
     if (_unit < 0)
     {
-        static Threading::Mutex mutex;
-        mutex.lock();
+        static Threading::Mutex mutex(OE_MUTEX_NAME);
+        Threading::ScopedMutexLock lock(mutex);
 
         osg::ref_ptr<TerrainResources> tr;
         if (_unit < 0 && _resources.lock(tr))
         {
             tr->reserveTextureImageUnit(_unit, "Draping");
         }
-
-        mutex.unlock();
     }
 }
 

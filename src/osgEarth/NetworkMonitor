@@ -1,6 +1,6 @@
 /* -*-c++-*- */
 /* osgEarth - Geospatial SDK for OpenSceneGraph
- * Copyright 2018 Pelican Mapping
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -84,6 +84,7 @@ namespace osgEarth {
         static bool getEnabled();
         static void setEnabled(bool enabled);
         static void clear();
+        static void saveCSV(Requests& requests, const std::string& filename);
 
         static void setRequestLayer(const std::string& name);
         static std::string getRequestLayer();

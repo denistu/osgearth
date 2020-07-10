@@ -96,7 +96,7 @@ struct RotateImage : public ControlEventHandler
     void onValueChanged( Control* control, float value )
     {
         if (s_imageControl)
-            s_imageControl->setRotation( Angular(value) );
+            s_imageControl->setRotation( Angle(value, Units::DEGREES) );
     }
 };
 
@@ -113,7 +113,7 @@ createControls( ControlCanvas* cs )
         center->setVertAlign( Control::ALIGN_CENTER );
 
         // Add an image:
-        osg::ref_ptr<osg::Image> image = osgDB::readRefImageFile("../data/osgearth.gif");
+        osg::ref_ptr<osg::Image> image = osgDB::readRefImageFile("../data/icon.png");
         if ( image.valid() )
         {
             s_imageControl = new ImageControl( image.get() );

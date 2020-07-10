@@ -25,7 +25,7 @@
 #include <osgEarth/SpatialReference>
 #include <osgEarth/ImageUtils>
 #include <osgEarth/Status>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 
 #include <osg/Referenced>
 #include <osg/Image>
@@ -107,6 +107,11 @@ namespace osgEarth
          * Constructs an empty (and invalid) geopoint.
          */
         GeoPoint();
+        
+        /**
+         * Constructs a GeoPoint at 0,0,0 absolute.
+         */
+        GeoPoint(const SpatialReference* srs);
 
         /**
          * Constructs a geopoint from serialization
@@ -186,6 +191,9 @@ namespace osgEarth
          */
         bool transformZ(const AltitudeMode& altMode, const TerrainResolver* t, double& out_z) const;
 
+        //! Transforms a resolution distance to a cartesian value.
+        Distance transformResolution(const Distance& d, const Units& outUnits) const;
+
         /**
          * Transforms this geopoint's Z to be absolute w.r.t. the vertical datum
          */
@@ -249,6 +257,8 @@ namespace osgEarth
          */
         GeoPoint interpolate(const GeoPoint& rhs, double t) const;
 
+        //! Convenience function to return xy units
+        const Units& getXYUnits() const;
 
         bool operator == (const GeoPoint& rhs) const;
         bool operator != (const GeoPoint& rhs) const { return !operator==(rhs); }
@@ -610,10 +620,10 @@ namespace osgEarth
         GeoImage(const Status&);
 
         //! Constructs a new goereferenced image.
-        GeoImage(osg::Image* image, const GeoExtent& extent);
+        GeoImage(const osg::Image* image, const GeoExtent& extent);
 
         //! Constructs a new goereferenced image from a future.
-        GeoImage(Future<osg::Image> image, const GeoExtent& extent);
+        GeoImage(Future<const osg::Image> image, const GeoExtent& extent);
 
         /** dtor */
         virtual ~GeoImage() { }
@@ -632,7 +642,7 @@ namespace osgEarth
         /**
          * Gets a pointer to the underlying OSG image.
          */
-        osg::Image* getImage() const;
+        const osg::Image* getImage() const;
 
         /**
          * Gets the geospatial extent of the image.
@@ -687,23 +697,9 @@ namespace osgEarth
             bool useBilinearInterpolation = true) const;
 
         /**
-         * Adds a one-pixel transparent border around an image.
-         */
-        GeoImage addTransparentBorder(
-            bool leftBorder=true, 
-            bool rightBorder=true, 
-            bool bottomBorder=true, 
-            bool topBorder=true);
-
-        /**
-         * Sets alpha to Zero for any pixels that do NOT intersect the masking extent.
-         */
-        void applyAlphaMask(const GeoExtent& maskingExtent);
-
-        /**
          * Returns the underlying OSG image and releases the reference pointer.
          */
-        osg::Image* takeImage();
+        const osg::Image* takeImage();
 
 		/**
 		 * Gets the units per pixel of this geoimage
@@ -711,39 +707,13 @@ namespace osgEarth
 		double getUnitsPerPixel() const;
 
     private:
-        osg::ref_ptr<osg::Image> _myimage;
-        mutable optional<Future<osg::Image> > _future;
-        GeoExtent                _extent;
-        Status                   _status;
+        osg::ref_ptr<const osg::Image> _myimage;
+        mutable optional<Future<const osg::Image> > _future;
+        GeoExtent _extent;
+        Status _status;
     };
 
     typedef std::vector<GeoImage> GeoImageVector;
-
-
-    class OSGEARTH_EXPORT NormalMap : public osg::Image
-    {
-    public:
-        NormalMap(unsigned s, unsigned t);
-
-        NormalMap(const osg::Image& image);
-
-        void set(unsigned s, unsigned t, const osg::Vec3& normal, float curvature =0.0f);
-
-        void generateCurvatures();
-
-        osg::Vec3 getNormal(unsigned s, unsigned t) const;
-
-        osg::Vec3 getNormalByUV(double u, double v) const;
-
-        float getCurvature(unsigned s, unsigned t) const;
-
-        virtual ~NormalMap();
-
-    private:
-        ImageUtils::PixelWriter* _write;
-        ImageUtils::PixelReader* _read;
-    };
-
 
     /**
      * A georeferenced heightfield and associated normal/curvature map.
@@ -761,17 +731,8 @@ namespace osgEarth
          * Constructs a new georeferenced heightfield.
          */
         GeoHeightField(
-            osg::HeightField* heightField,
+            const osg::HeightField* heightField,
             const GeoExtent&  extent );
-
-        //! Constructs a new GeoHeightField
-        //! @param[in] heightField Elevation grid
-        //! @param[in] normalMap   Normal/Curvature map
-        //! @param[in] extent      Geospatial extent of the data
-        GeoHeightField(
-            osg::HeightField* heightField,
-            NormalMap*        normalMap,
-            const GeoExtent&  extent);
 
         /** dtor */
         virtual ~GeoHeightField() { }
@@ -815,20 +776,8 @@ namespace osgEarth
             const SpatialReference* srsWithOutputVerticalDatum,
             float&                  out_elevation ) const;
 
-        bool getElevationAndNormal(
-            const SpatialReference* inputSRS, 
-            double                  x,
-            double                  y,
-            RasterInterpolation     interp,
-            const SpatialReference* srsWithOutputVerticalDatum,
-            float&                  out_elevation,
-            osg::Vec3&              out_normal ) const;
-
         //! Gets the elevation at a point (must be in the same SRS; bilinear interpolation)
         float getElevation(double x, double y) const;
-
-        //! Gets the normal at a point (must be in the same SRS; bilinear interpolation)
-        osg::Vec3 getNormal(double x, double y) const;
         
         /**
          * Subsamples the heightfield, returning a new heightfield corresponding to
@@ -856,9 +805,6 @@ namespace osgEarth
          */
         const osg::HeightField* getHeightField() const;
 
-        //! Normal map
-        const NormalMap* getNormalMap() const;
-
         /**
          * Gets the X interval of this GeoHeightField
          */
@@ -875,16 +821,15 @@ namespace osgEarth
         {
             inline bool operator() (const GeoHeightField& lhs, const GeoHeightField& rhs) const
             {                
-                return lhs.getXInterval() < rhs.getXInterval();                
+                return lhs.getXInterval() < rhs.getXInterval();
             }
         };
 
     protected:
-        osg::ref_ptr<osg::HeightField> _heightField;
-        osg::ref_ptr<NormalMap>        _normalMap;
-        GeoExtent                      _extent;
-        float                          _minHeight, _maxHeight;
-        Status                         _status;
+        osg::ref_ptr<const osg::HeightField> _heightField;
+        GeoExtent _extent;
+        float _minHeight, _maxHeight;
+        Status _status;
 
         void init();
     };
@@ -905,7 +850,7 @@ namespace osgEarth
         GeoNode(const Status&);
 
         //! Constructs a new goereferenced node
-        GeoNode(osg::Node* node, const GeoExtent& extent);
+        GeoNode(const osg::Node* node, const GeoExtent& extent);
 
         //! Global invalid node
         static GeoNode INVALID;
@@ -918,15 +863,15 @@ namespace osgEarth
         const Status& getStatus() const { return _status; }
 
         //! The underlying OSG node
-        osg::Node* getNode() const { return _node.get(); }
+        const osg::Node* getNode() const { return _node.get(); }
 
         //! The node's extent
         const GeoExtent& getExtent() const { return _extent; }
 
     private:
-        osg::ref_ptr<osg::Node> _node;
-        GeoExtent               _extent;
-        Status                  _status;
+        osg::ref_ptr<const osg::Node> _node;
+        GeoExtent _extent;
+        Status _status;
     };
 
     typedef std::vector<GeoNode> GeoNodeVector;
