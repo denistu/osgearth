@@ -70,10 +70,12 @@ ElevationPool::ElevationPool() :
     _tileSize(257),
     _mapDataDirty(true),
     _workers(0),
-    _refreshMutex("ElevPool(OE)"),
-    _globalLUTMutex("ElevPool LUT(OE)"),
+    _refreshMutex("OE.ElevPool.RM"),
+    _globalLUTMutex("OE.ElevPool.GLUT"),
     _L2(64u)
 {
+    _L2._lru.setName("OE.ElevPool.LRU");
+
     // adapter for detecting elevation layer changes
     _mapCallback = new MapCallbackAdapter();
 }
@@ -212,6 +214,7 @@ ElevationPool::WorkingSet::WorkingSet(unsigned size) :
     _lru(size)
 {
     //nop
+    _lru._lru.setName("OE.WorkingSet.LRU");
 }
 
 bool
@@ -492,7 +495,7 @@ ElevationPool::sampleMapCoords(
     for(auto& p : points)
     {
         {
-            OE_PROFILING_ZONE_NAMED("createTileKey");
+            //OE_PROFILING_ZONE_NAMED("createTileKey");
 
             // Reconsider, b/c an inset could mean we need to re-query the LOD.
             if ((p.w() >= 0.0f && p.w() != lastRes) ||
@@ -558,7 +561,7 @@ ElevationPool::sampleMapCoords(
             }
 
             {
-                OE_PROFILING_ZONE_NAMED("sample");
+                //OE_PROFILING_ZONE_NAMED("sample");
                 if (raster.valid())
                 {
                     u = (p.x() - raster->getExtent().xMin()) /  raster->getExtent().width();
