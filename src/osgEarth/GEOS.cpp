@@ -137,20 +137,11 @@ namespace
                             {
                                 if (GEOSGeomTypeId_r(handle, hole) == GEOSGeomTypes::GEOS_LINEARRING)
                                 {
-                                    if (hole->getGeometryTypeId() == geos::geom::GEOS_LINEARRING)
-                                    {
-#if GEOS_VERSION_AT_LEAST(3,8)
-                                        auto h = dynamic_cast<geom::LinearRing*>(hole);
-                                        if (h)
-                                            holes->push_back(h);
-#else
-                                        holes->push_back(hole);
-#endif
-                                    }
-                                    else
-                                    {
-                                        delete hole;
-                                    }
+                                    holes.push_back(hole);
+                                }
+                                else
+                                {
+                                    GEOSGeom_destroy_r(handle, hole);
                                 }
                             }
                         }
