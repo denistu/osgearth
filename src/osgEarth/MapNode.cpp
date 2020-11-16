@@ -451,8 +451,25 @@ MapNode::open()
     return true;
 }
 
+void
+MapNode::shutdown()
+{
+    if (_terrainEngine)
+        _terrainEngine->shutdown();
+
+    if (_map.valid())
+    {
+        LayerVector layers;
+        _map->getLayers(layers);
+        for(auto& layer : layers)
+            layer->close();
+    }
+}
+
 MapNode::~MapNode()
 {
+    shutdown();
+
     if (_mapCallback.valid())
     {
         // Remove this node's map callback first:
@@ -900,4 +917,18 @@ ClampingManager*
 MapNode::getClampingManager()
 {
     return _clampingManager;
+}
+
+bool
+MapNode::getGeoPointUnderMouse(
+    osg::View* view,
+    float mx, float my,
+    GeoPoint& output) const
+{
+    osg::Vec3d world;
+    if (getTerrain()->getWorldCoordsUnderMouse(view, mx, my, world))
+    {
+        return output.fromWorld(getMapSRS(), world);
+    }
+    return false;
 }

@@ -368,7 +368,7 @@ SpatialReference::getHandle() const
 SpatialReference*
 SpatialReference::createFromHandle(void* ogrHandle)
 {
-    OE_SOFT_ASSERT_AND_RETURN(ogrHandle!=nullptr, __FUNCTION__, nullptr);
+    OE_SOFT_ASSERT_AND_RETURN(ogrHandle!=nullptr, __func__, nullptr);
 
     return new SpatialReference(ogrHandle);
 
@@ -876,7 +876,7 @@ SpatialReference::createCoordinateSystemNode() const
 bool
 SpatialReference::populateCoordinateSystemNode( osg::CoordinateSystemNode* csn ) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(csn!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(csn!=nullptr, __func__, false);
 
     if ( !_wkt.empty() )
     {
@@ -942,7 +942,7 @@ SpatialReference::transform(const osg::Vec3d&       input,
                             const SpatialReference* outputSRS,
                             osg::Vec3d&             output) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __func__, false);
 
     std::vector<osg::Vec3d> v(1, input);
 
@@ -959,7 +959,7 @@ bool
 SpatialReference::transform(std::vector<osg::Vec3d>& points,
                             const SpatialReference*  outputSRS) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __func__, false);
 
     // trivial equivalency:
     if ( isEquivalentTo(outputSRS) )
@@ -1064,7 +1064,7 @@ SpatialReference::transform2D(double x, double y,
                               const SpatialReference* outputSRS,
                               double& out_x, double& out_y ) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __func__, false);
 
     osg::Vec3d temp(x,y,0);
     bool ok = transform(temp, outputSRS, temp);
@@ -1084,7 +1084,7 @@ SpatialReference::transformXYPointArrays(
     unsigned count,
     const SpatialReference* out_srs) const
 {  
-    OE_SOFT_ASSERT_AND_RETURN(out_srs!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(out_srs!=nullptr, __func__, false);
 
     // Transform the X and Y values inside an exclusive GDAL/OGR lock
     optional<TransformInfo>& xform = local._xformCache[out_srs->getWKT()];
@@ -1126,7 +1126,7 @@ SpatialReference::transformZ(std::vector<osg::Vec3d>& points,
                              const SpatialReference*  outputSRS,
                              bool                     pointsAreLatLong) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(outputSRS!=nullptr, __func__, false);
 
     const VerticalDatum* outVDatum = outputSRS->getVerticalDatum();
 
@@ -1252,7 +1252,7 @@ SpatialReference::transformUnits(double                  input,
                                  const SpatialReference* outSRS,
                                  double                  latitude) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(outSRS!=nullptr, __FUNCTION__, input);
+    OE_SOFT_ASSERT_AND_RETURN(outSRS!=nullptr, __func__, input);
 
     if ( this->isProjected() && outSRS->isGeographic() )
     {
@@ -1288,7 +1288,7 @@ SpatialReference::transformUnits(const Distance&         distance,
                                  const SpatialReference* outSRS,
                                  double                  latitude)
 {
-    OE_SOFT_ASSERT_AND_RETURN(outSRS!=nullptr, __FUNCTION__, distance.getValue());
+    OE_SOFT_ASSERT_AND_RETURN(outSRS!=nullptr, __func__, distance.getValue());
 
     if ( distance.getUnits().isLinear() && outSRS->isGeographic() )
     {
@@ -1316,7 +1316,7 @@ SpatialReference::transformExtentToMBR(
     double&                 in_out_xmax,
     double&                 in_out_ymax) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(to_srs!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(to_srs!=nullptr, __func__, false);
 
     // Transform all points and take the maximum bounding rectangle the resulting points
     std::vector<osg::Vec3d> v;
@@ -1395,7 +1395,7 @@ SpatialReference::transformExtentPoints(
     double* x, double* y,
     unsigned int numx, unsigned int numy ) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(to_srs!=nullptr, __FUNCTION__, false);
+    OE_SOFT_ASSERT_AND_RETURN(to_srs!=nullptr, __func__, false);
 
     std::vector<osg::Vec3d> points;
 

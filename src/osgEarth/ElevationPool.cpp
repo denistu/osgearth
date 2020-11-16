@@ -155,7 +155,7 @@ ElevationPool::refresh(const Map* map)
 {
     _elevationLayers.clear();
 
-    OE_INFO << LC << "Refreshing EP index" << std::endl;
+    OE_DEBUG << LC << "Refreshing EP index" << std::endl;
 
     if (_index)
         delete static_cast<MaxLevelIndex*>(_index);
@@ -165,7 +165,7 @@ ElevationPool::refresh(const Map* map)
     MaxLevelIndex* index = new MaxLevelIndex();
     _index = index;
 
-    double minv[2], maxv[2];
+    double a_min[2], a_max[2];
         
     for(auto i : _elevationLayers)
     {
@@ -176,13 +176,16 @@ ElevationPool::refresh(const Map* map)
         {
             GeoExtent extentInMapSRS = map->getProfile()->clampAndTransformExtent(*de);
 
-            minv[0] = extentInMapSRS.xMin(), minv[1] = extentInMapSRS.yMin();
-            maxv[0] = extentInMapSRS.xMax(), maxv[1] = extentInMapSRS.yMax();
+            a_min[0] = extentInMapSRS.xMin(), a_min[1] = extentInMapSRS.yMin();
+            a_max[0] = extentInMapSRS.xMax(), a_max[1] = extentInMapSRS.yMax();
 
-            // Check.
-            unsigned maxLevel = layer->getProfile()->getEquivalentLOD(map->getProfile(), de->maxLevel().get());
+            unsigned maxLevel = osg::minimum(
+                de->maxLevel().get(),
+                layer->getMaxDataLevel());
 
-            index->Insert(minv, maxv, maxLevel);            
+            maxLevel = layer->getProfile()->getEquivalentLOD(map->getProfile(), maxLevel);
+
+            index->Insert(a_min, a_max, maxLevel);
         }
     }
 
@@ -215,6 +218,13 @@ ElevationPool::WorkingSet::WorkingSet(unsigned size) :
 {
     //nop
     _lru._lru.setName("OE.WorkingSet.LRU");
+}
+
+void
+ElevationPool::WorkingSet::clear()
+{
+    _lru.clear();
+    // No need to clear the elevation layers; only invalidate the cache.
 }
 
 bool
@@ -748,6 +758,8 @@ ElevationPool::getSample(
     ScopedAtomicCounter counter(_workers);
 
     Internal::RevElevationKey key;
+    // Need to limit maxLOD <= INT_MAX else osg::minimum for lod will return -1 due to cast
+    maxLOD = osg::minimum(maxLOD, static_cast<unsigned>(std::numeric_limits<int>::max()));
     int lod = osg::minimum( getLOD(p.x(), p.y()), (int)maxLOD );
     if (lod >= 0)
     {   
@@ -900,7 +912,7 @@ AsyncElevationSampler::AsyncElevationSampler(
 
     _map(map)
 {
-    _threadPool = new ThreadPool(numThreads);
+    _threadPool = new ThreadPool("osgEarth.ElevationPool", numThreads);
 }
 
 Future<RefElevationSample>

@@ -1493,7 +1493,7 @@ GeoExtent::area() const
 double
 GeoExtent::normalizeX(double x) const
 {
-    if (isValid() && is_valid(x) && _srs->isGeographic())
+    if (is_valid(x) && _srs.valid() && _srs->isGeographic())
     {
         if (fabs(x) <= 180.0)
         {
@@ -1670,7 +1670,7 @@ GeoExtent(extent)
 
 DataExtent::DataExtent(const GeoExtent& extent, unsigned minLevel) :
 GeoExtent(extent),
-_maxLevel( 25 )
+_maxLevel( 19u )
 {
     _minLevel = minLevel;
 }
@@ -1686,7 +1686,7 @@ _maxLevel( 0 )
 DataExtent::DataExtent(const GeoExtent& extent ) :
 GeoExtent(extent),
 _minLevel( 0 ),
-_maxLevel( 25 )
+_maxLevel( 19u )
 {
     //nop
 }

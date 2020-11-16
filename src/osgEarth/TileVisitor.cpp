@@ -133,7 +133,7 @@ void TileVisitor::processKey( const TileKey& key )
     lod = key.getLevelOfDetail();    
 
     // Only process this key if it has a chance of succeeding.
-    if (_tileHandler && !_tileHandler->hasData(key))
+    if (_tileHandler && key.getLOD() >= _minLevel && !_tileHandler->hasData(key))
     {                
         return;
     }    
@@ -264,7 +264,7 @@ void MultithreadedTileVisitor::run(const Profile* mapProfile)
     // Start up the task service
     OE_INFO << "Starting " << _numThreads << " threads " << std::endl;
 
-    _threadPool = new ThreadPool(_numThreads);
+    _threadPool = new ThreadPool("osgEarth.TileVisitor", _numThreads);
 
     // Produce the tiles
     TileVisitor::run( mapProfile );

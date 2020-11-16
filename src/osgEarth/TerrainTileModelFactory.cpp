@@ -21,6 +21,7 @@
 #include <osgEarth/Map>
 #include <osgEarth/Registry>
 #include <osgEarth/LandCoverLayer>
+#include <osgEarth/TerrainConstraintLayer>
 #include <osgEarth/Metrics>
 
 #include <osg/Texture2D>
@@ -30,12 +31,74 @@
 
 using namespace osgEarth;
 
+class FutureImage : public osg::Image
+{
+public:
+
+    FutureImage(ImageLayer* layer, const TileKey& key) : osg::Image()
+    {
+        _layer = layer;
+        _key = key;
+
+        osg::observer_ptr<ImageLayer> layer_ptr(_layer);
+
+        Job<const osg::Image> job([layer_ptr, key](Cancelable* progress) mutable {
+            osg::ref_ptr<ImageLayer> safe(layer_ptr);
+            if (safe.valid()) {
+                GeoImage result = safe->createImage(key, nullptr); // progress TODO
+                return result.takeImage();
+            }
+            else return static_cast<const osg::Image*>(nullptr);
+        });
+
+        _result = job.schedule("ASYNC_LAYER");
+    }
+
+    virtual bool requiresUpdateCall() const override
+    {
+        // tricky, because if we return false here, it will
+        // never get called again.
+        return _result.isAvailable() || !_result.isAbandoned();
+    }
+
+    virtual void update(osg::NodeVisitor* nv) override
+    {
+        if (_result.isAvailable())
+        {
+            // no refptr here because we are going to steal the data.
+            osg::ref_ptr<osg::Image> i = const_cast<osg::Image*>(_result.release());
+
+            if (i.valid())
+            {
+                this->setImage(
+                    i->s(), i->t(), i->r(),
+                    i->getInternalTextureFormat(), i->getPixelFormat(), i->getDataType(),
+                    i->data(), i->getAllocationMode(),
+                    i->getPacking(),
+                    i->getRowLength());
+
+                // since we stole the data, make sure we don't double-delete it
+                i->setAllocationMode(osg::Image::NO_DELETE);
+
+                // trigger texture(s) that own this image to reapply
+                this->dirty();
+            }
+        }
+    }
+
+    osg::ref_ptr<ImageLayer> _layer;
+    TileKey _key;
+    Job<const osg::Image>::Result _result;
+};
+
 //.........................................................................
 
 CreateTileManifest::CreateTileManifest()
 {
     _includesElevation = false;
+    _includesConstraints = false;
     _includesLandCover = false;
+    _progressive.setDefault(false);
 }
 
 void CreateTileManifest::insert(const Layer* layer)
@@ -45,10 +108,19 @@ void CreateTileManifest::insert(const Layer* layer)
         _layers[layer->getUID()] = layer->getRevision();
 
         if (dynamic_cast<const ElevationLayer*>(layer))
+        {
             _includesElevation = true;
+        }
 
-        if (dynamic_cast<const LandCoverLayer*>(layer))
+        else if (dynamic_cast<const TerrainConstraintLayer*>(layer))
+        {
+            _includesConstraints = true;
+        }
+
+        else if (dynamic_cast<const LandCoverLayer*>(layer))
+        {
             _includesLandCover = true;
+        }
     }
 }
 
@@ -109,9 +181,19 @@ bool CreateTileManifest::includesElevation() const
     return empty() || _includesElevation;
 }
 
+bool CreateTileManifest::includesConstraints() const
+{
+    return _includesConstraints;
+}
+
 bool CreateTileManifest::includesLandCover() const
 {
     return empty() || _includesLandCover;
+}
+
+void CreateTileManifest::setProgressive(bool value)
+{
+    _progressive = value;
 }
 
 //.........................................................................
@@ -217,6 +299,22 @@ TerrainTileModelFactory::addImageLayer(
             scaleBiasMatrix = window.getMatrix();
         }
 
+        else if (imageLayer->getAsyncLoading() == true)
+        {
+            osg::Image* image = new FutureImage(imageLayer, key);
+
+            tex = new osg::Texture2D(image);
+            tex->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+            tex->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+            tex->setResizeNonPowerOfTwoHint(false);
+            osg::Texture::FilterMode magFilter = imageLayer->options().magFilter().get();
+            osg::Texture::FilterMode minFilter = imageLayer->options().minFilter().get();
+            tex->setFilter(osg::Texture::MAG_FILTER, magFilter);
+            tex->setFilter(osg::Texture::MIN_FILTER, minFilter);
+            tex->setMaxAnisotropy(4.0f);
+            tex->setUnRefImageDataAfterApply(false);
+        }
+
         else
         {
             GeoImage geoImage = imageLayer->createImage(key, progress);
@@ -259,7 +357,7 @@ TerrainTileModelFactory::addImageLayer(
             model->sharedLayers().push_back(layerModel);
         }
 
-        if (imageLayer->isDynamic())
+        if (imageLayer->isDynamic() || imageLayer->getAsyncLoading())
         {
             model->setRequiresUpdateTraverse(true);
         }
@@ -407,24 +505,49 @@ TerrainTileModelFactory::addElevation(
     bool needElevation = manifest.includesElevation();
     ElevationLayerVector layers;
     map->getLayers(layers);
-    int combinedRevision = map->getDataModelRevision();
 
+    int combinedRevision = map->getDataModelRevision();
     if (!manifest.empty())
     {
-        for(ElevationLayerVector::const_iterator i = layers.begin(); i != layers.end(); ++i)
+        for (const auto& layer : layers)
         {
-            const ElevationLayer* layer = i->get();
-
-            if (needElevation == false && !manifest.excludes(layer))
+            if (needElevation == false && !manifest.excludes(layer.get()))
             {
                 needElevation = true;
             }
-
             combinedRevision += layer->getRevision();
         }
     }
     if (!needElevation)
         return;
+
+#if 0
+    LayerVector terrain_layers;
+
+    map->getLayers(
+        terrain_layers,
+        [] (const Layer* layer) {
+            return
+                dynamic_cast<const ElevationLayer*>(layer) != nullptr ||
+                dynamic_cast<const TerrainConstraintLayer*>(layer) != nullptr;
+        });
+
+    int combinedRevision = map->getDataModelRevision();
+
+    if (!manifest.empty())
+    {
+        for(const auto& layer : terrain_layers)
+        {
+            if (needElevation == false && !manifest.excludes(layer.get()))
+            {
+                needElevation = true;
+            }
+            combinedRevision += layer->getRevision();
+        }
+    }
+    if (!needElevation)
+        return;
+#endif
 
     osg::ref_ptr<ElevationTexture> elevTex;
 
@@ -603,10 +726,22 @@ TerrainTileModelFactory::createImageTexture(const osg::Image* image,
     if (compressionMethod.empty())
         compressionMethod = _options.textureCompression().get();
 
+    GLenum pixelFormat = image->getPixelFormat();
+    GLenum internalFormat = image->getInternalTextureFormat();
+
+    // Fix incorrect internal format if necessary
+    if (internalFormat == pixelFormat)
+    {
+        if (pixelFormat == GL_RGB) internalFormat = GL_RGB8;
+        else if (pixelFormat == GL_RGBA) internalFormat = GL_RGBA8;
+        else if (pixelFormat == GL_RG) internalFormat = GL_RG8;
+        else if (pixelFormat == GL_RED) internalFormat = GL_R8;
+    }
+
     if (image->r() == 1)
     {
-        const osg::Image* compressed = ImageUtils::compressImage(image, compressionMethod);
-        const osg::Image* mipmapped = ImageUtils::mipmapImage(compressed);
+        osg::ref_ptr<const osg::Image> compressed = ImageUtils::compressImage(image, compressionMethod);
+        const osg::Image* mipmapped = ImageUtils::mipmapImage(compressed.get());
         tex = new osg::Texture2D(const_cast<osg::Image*>(mipmapped));
         hasMipMaps = mipmapped->isMipmap();
         isCompressed = mipmapped->isCompressed();
@@ -617,14 +752,20 @@ TerrainTileModelFactory::createImageTexture(const osg::Image* image,
 
     else // if (image->r() > 1)
     {
-        std::vector< osg::ref_ptr<const osg::Image> > images;
+        std::vector< osg::ref_ptr<osg::Image> > images;
         ImageUtils::flattenImage(image, images);
+
+        // Make sure we are using a proper sized internal format
+        for(int i=0; i<images.size(); ++i)
+        {
+            images[i]->setInternalTextureFormat(internalFormat);
+        }
         
-        const osg::Image* compressed;
+        osg::ref_ptr<const osg::Image> compressed;
         for(auto& ref : images)
         {
             compressed = ImageUtils::compressImage(ref.get(), compressionMethod);
-            ref = ImageUtils::mipmapImage(compressed);
+            ref = const_cast<osg::Image*>(ImageUtils::mipmapImage(compressed.get()));
 
             if (layer->getCompressionMethod() == "gpu" && !compressed->isCompressed())
                 tex->setInternalFormatMode(tex->USE_S3TC_DXT5_COMPRESSION);
@@ -635,25 +776,13 @@ TerrainTileModelFactory::createImageTexture(const osg::Image* image,
 
         osg::Texture2DArray* tex2dArray = new osg::Texture2DArray();
 
-        tex2dArray->setTextureDepth(images.size());
+        tex2dArray->setTextureSize(image[0].s(), image[0].t(), images.size());
         tex2dArray->setInternalFormat(images[0]->getInternalTextureFormat());
         tex2dArray->setSourceFormat(images[0]->getPixelFormat());
         for (int i = 0; i < (int)images.size(); ++i)
             tex2dArray->setImage(i, const_cast<osg::Image*>(images[i].get()));
 
         tex = tex2dArray;
-    }
-
-    if (!isCompressed)
-    {
-        // Make sure we are using a proper sized internal format
-        if (tex->getImage(0)->getInternalTextureFormat() == tex->getImage(0)->getPixelFormat())
-        {
-            if (tex->getImage(0)->getPixelFormat() == GL_RGB) tex->setInternalFormat(GL_RGB8);
-            else if (tex->getImage(0)->getPixelFormat() == GL_RGBA) tex->setInternalFormat(GL_RGBA8);
-            else if (tex->getImage(0)->getPixelFormat() == GL_RG) tex->setInternalFormat(GL_RG8);
-            else if (tex->getImage(0)->getPixelFormat() == GL_RED) tex->setInternalFormat(GL_R8);
-        }
     }
 
     tex->setDataVariance(osg::Object::STATIC);

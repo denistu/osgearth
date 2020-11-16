@@ -322,7 +322,7 @@ namespace osgEarth
         virtual void setTerrainResources(TerrainResources*);
 
         //! Revision number of this layer
-        unsigned getRevision() const { return (unsigned)_revision; }
+        int getRevision() const { return (int)_revision; }
 
         class Options;
 
@@ -362,6 +362,7 @@ namespace osgEarth
         Hints& layerHints();
 
     private:
+        const std::string& _layerName;
         UID _uid;
         osg::ref_ptr<osg::StateSet> _stateSet;
         RenderType _renderType;
@@ -369,7 +370,7 @@ namespace osgEarth
         osg::ref_ptr<SceneGraphCallbacks> _sceneGraphCallbacks;
         osg::ref_ptr<TraversalCallback> _traversalCallback;
         Hints _hints;
-        OpenThreads::Atomic _revision;
+        std::atomic_int _revision;
         std::string _runtimeCacheId;
         osg::ref_ptr<osgDB::Options> _readOptions;
         osg::ref_ptr<CacheSettings> _cacheSettings;
@@ -432,7 +433,7 @@ namespace osgEarth
     private:
         Layer::Options * _options;
         Layer::Options   _optionsConcrete;
-        Layer ( const Layer& rhs, const osg::CopyOp& op ) { }
+        Layer ( const Layer& rhs, const osg::CopyOp& op );
 
         // allow the map access to the addedToMap/removedFromMap methods
         friend class Map;

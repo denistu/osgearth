@@ -304,16 +304,10 @@ ImageUtils::resizeImage(const osg::Image* input,
 
 bool
 ImageUtils::flattenImage(const osg::Image* input,
-                         std::vector<osg::ref_ptr<const osg::Image> >& output)
+                         std::vector<osg::ref_ptr<osg::Image> >& output)
 {
-    if (input == 0L)
+    if (input == 0L || input->r() < 2)
         return false;
-
-    if ( input->r() == 1 )
-    {
-        output.push_back( input );
-        return true;
-    }
 
     for(int r=0; r<input->r(); ++r)
     {
@@ -640,7 +634,7 @@ ImageUtils::compressImage(
     if (input->isCompressed())
         return input;
 
-    if (method == "none")
+    if (method.empty() || method == "none")
         return input;
 
     if (method == "gpu")
@@ -677,7 +671,7 @@ ImageUtils::compressImage(
             *output,        // image to compress
             mode,           // compression mode
             true,           // generate mipmaps if possible
-            false,          // resize to power of 2
+            true,           // resize to power of 2
             ip->USE_CPU,    // technique (always use CPU here)
             ip->FASTEST);   // quality
     }
@@ -735,19 +729,13 @@ ImageUtils::compressImageInPlace(
 
         ip = osgDB::Registry::instance()->getImageProcessorForExtension(driver);
 
-        // didn't work? fall back on NVTT
-        if (!ip && driver != "nvtt")
-        {
-            ip = osgDB::Registry::instance()->getImageProcessorForExtension("nvtt");
-        }
-
         if (ip)
         {
             ip->compress(
-                *input,        // image to compress
+                *input,         // image to compress
                 mode,           // compression mode
                 true,           // generate mipmaps if possible
-                false,          // resize to power of 2
+                true,           // resize to power of 2
                 ip->USE_CPU,    // technique (always use CPU here)
                 ip->FASTEST);   // quality
         }
@@ -757,6 +745,40 @@ ImageUtils::compressImageInPlace(
             // CPU didn't work so just use GPU. (cheating)
             input->setInternalTextureFormat(mode);
         }
+    }
+}
+
+namespace
+{
+    struct CompressAndMipmapTextures : public TextureAndImageVisitor
+    {
+        void apply(osg::Texture& texture)
+        {
+            for (unsigned i = 0; i < texture.getNumImages(); ++i)
+            {
+                // Only process textures with valid images.
+                osg::ref_ptr< osg::Image > image = texture.getImage(i);
+                if (image.valid())
+                {
+                    ImageUtils::compressImageInPlace(image.get());
+                    ImageUtils::mipmapImageInPlace(image.get());
+                }
+                else
+                {
+                    OE_WARN << "Skipping null image in CompressAndMipmapTextures" << std::endl;
+                }
+            }
+        }
+    };
+}
+
+void
+ImageUtils::compressAndMipmapTextures(osg::Node* node)
+{
+    if (node)
+    {
+        CompressAndMipmapTextures visitor;
+        node->accept(visitor);
     }
 }
 
@@ -844,7 +866,7 @@ ImageUtils::readStream(std::istream& stream, const osgDB::Options* options) {
 osg::Texture2DArray*
 ImageUtils::makeTexture2DArray(osg::Image* image)
 {
-    std::vector< osg::ref_ptr<const osg::Image> > images;
+    std::vector< osg::ref_ptr<osg::Image> > images;
     if (image->r() > 1)
     {
         ImageUtils::flattenImage(image, images);
@@ -959,6 +981,25 @@ ImageUtils::cropImage(const osg::Image* image,
             const void* src_data = image->data(windowX, src_row, layer);
             void* dst_data = cropped->data(0, dst_row, layer);
             memcpy( dst_data, src_data, cropped->getRowSizeInBytes());
+        }
+    }
+    return cropped;
+}
+
+osg::Image*
+ImageUtils::cropImage(osg::Image* image, unsigned int x, unsigned int y, unsigned int width, unsigned int height)
+{
+    osg::Image* cropped = new osg::Image;
+    cropped->allocateImage(width, height, image->r(), image->getPixelFormat(), image->getDataType());
+    cropped->setInternalTextureFormat(image->getInternalTextureFormat());
+
+    for (int layer = 0; layer < image->r(); ++layer)
+    {
+        for (int src_row = y, dst_row = 0; dst_row < height; src_row++, dst_row++)
+        {
+            const void* src_data = image->data(x, src_row, layer);
+            void* dst_data = cropped->data(0, dst_row, layer);
+            memcpy(dst_data, src_data, cropped->getRowSizeInBytes());
         }
     }
     return cropped;
