@@ -740,14 +740,8 @@ SpatialReference::createTransMercFromLongitude( const Angle& lon ) const
     std::string horiz = Stringify()
         << "+proj=tmerc +lat_0=0"
         << " +lon_0=" << lon.as(Units::DEGREES)
-<<<<<<< HEAD
-        << " +datum=" << (!datum.empty() ? "wgs84" : datum);
-
-    return SpatialReference::create( horiz, getVertInitString() );
-=======
         << " +datum=" << (!datum.empty() ? "WGS84" : datum);
-    return create( horiz, getVertInitString() );
->>>>>>> f28919230 (fix wgs84 -> WGS84)
+    return SpatialReference::create( horiz, getVertInitString() );
 }
 
 const SpatialReference*
@@ -759,14 +753,8 @@ SpatialReference::createUTMFromLonLat(const Angle& lon, const Angle& lat) const
     std::string horiz = Stringify()
         << "+proj=utm +zone=" << zone
         << (lat.as(Units::DEGREES) < 0 ? " +south" : "")
-<<<<<<< HEAD
-        << " +datum=" << (!datum.empty() ? "wgs84" : datum);
-
-    return SpatialReference::create(horiz, getVertInitString());
-=======
         << " +datum=" << (!datum.empty() ? "WGS84" : datum);
-    return create( horiz, getVertInitString() );
->>>>>>> f28919230 (fix wgs84 -> WGS84)
+    return SpatialReference::create(horiz, getVertInitString());
 }
 
 const SpatialReference*
