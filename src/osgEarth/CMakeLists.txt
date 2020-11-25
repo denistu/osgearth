@@ -3,8 +3,6 @@ IF   (DYNAMIC_OSGEARTH)
 ELSE (DYNAMIC_OSGEARTH)
     ADD_DEFINITIONS(-DOSGEARTH_LIBRARY_STATIC)
 ENDIF(DYNAMIC_OSGEARTH)
-# Add __STDC_FORMAT_MACROS for use of PRIu64 macro
-ADD_DEFINITIONS(-D__STDC_FORMAT_MACROS)
 
 # CURL options
 OPTION(CURL_IS_STATIC "on if curl is a static lib " ON)
@@ -55,7 +53,6 @@ set(TARGET_GLSL
     ClipPlane.glsl
     DepthOffset.glsl
     Draping.glsl
-    DrawInstancedAttribute.glsl
     GPUClamping.glsl
     GPUClamping.lib.glsl
     Instancing.glsl
@@ -72,7 +69,6 @@ set(TARGET_GLSL
     ShadowCaster.glsl
     SimpleOceanLayer.glsl
     RTTPicker.glsl
-    WindLayer.CS.glsl
 )
 
 set(SHADERS_CPP "${CMAKE_CURRENT_BINARY_DIR}/AutoGenShaders.cpp")
@@ -123,7 +119,6 @@ SET(LIB_PUBLIC_HEADERS
     DrapingTechnique
     DrawInstanced
     ECEF
-    Elevation
     ElevationLayer
     ElevationLOD
     ElevationPool
@@ -153,8 +148,6 @@ SET(LIB_PUBLIC_HEADERS
     ImageMosaic
     ImageToHeightFieldConverter
     ImageUtils
-    ImGuiUtils
-    InstanceBuilder
     InstanceCloud
     IntersectionPicker
     IOTypes
@@ -170,13 +163,14 @@ SET(LIB_PUBLIC_HEADERS
     LineFunctor
     Locators
     LocalTangentPlane
-    Math
     Map
     MapCallback
     MapInfo
     MapModelChange
     MapNode
     MapNodeObserver
+    MaskLayer
+    MaskSource
     Memory
     MemCache
     MetaTile
@@ -185,7 +179,6 @@ SET(LIB_PUBLIC_HEADERS
     ModelLayer
     ModelSource
     NativeProgramAdapter
-    NetworkMonitor
     NodeUtils
     Notify
     optional
@@ -216,14 +209,13 @@ SET(LIB_PUBLIC_HEADERS
     ShaderLoader
     ShaderMerger
     ShaderUtils
-    SelectExtentTool
     SimplexNoise
     SpatialReference
     StateSetCache
-    StateTransition
     Status
     StringUtils
     TDTiles
+    TaskService
     Terrain
     TerrainEffect
     TerrainOptions
@@ -249,7 +241,7 @@ SET(LIB_PUBLIC_HEADERS
     TileCache
     TimeControl
     TraversalData
-    Threading
+    ThreadingUtils
     TMS
     Units
     URI
@@ -329,7 +321,7 @@ SET(LIB_PUBLIC_HEADERS
     FeatureElevationLayer
     FeatureImageLayer
     FeatureIndex
-    TerrainConstraintLayer
+    FeatureMaskLayer
     FeatureModelGraph
     FeatureModelLayer
     FeatureModelSource
@@ -358,7 +350,6 @@ SET(LIB_PUBLIC_HEADERS
     TextSymbolizer
     TFS
     TransformFilter
-    WingedEdgeMesh
     WireLines
     XYZFeatureSource
     WFS
@@ -428,13 +419,11 @@ SET(LIB_PUBLIC_HEADERS
     RectangleNode
     TrackNode
     OsgGeometryOperator
-    WindLayer
-    TerrainLayer
 
     rtree.h
 
     FileGDBFeatureSource
-
+    
     ${OSGEARTH_BUILDCONFIG_HEADER}
 )
 
@@ -504,7 +493,6 @@ set(TARGET_SRC
     DrapingTechnique.cpp
     DrawInstanced.cpp
     ECEF.cpp
-    Elevation.cpp
     ElevationLayer.cpp
     ElevationLOD.cpp
     ElevationPool.cpp
@@ -531,7 +519,6 @@ set(TARGET_SRC
     ImageMosaic.cpp
     ImageToHeightFieldConverter.cpp
     ImageUtils.cpp
-    InstanceBuilder.cpp
     IntersectionPicker.cpp
     IOTypes.cpp
     JoinPointsLinesFilter.cpp
@@ -549,6 +536,8 @@ set(TARGET_SRC
     MapCallback.cpp
     MapInfo.cpp
     MapNode.cpp
+    MaskLayer.cpp
+    MaskSource.cpp
     MemCache.cpp
     Memory.cpp
     MetaTile.cpp
@@ -557,7 +546,6 @@ set(TARGET_SRC
     MimeTypes.cpp
     ModelLayer.cpp
     ModelSource.cpp
-    NetworkMonitor.cpp
     NodeUtils.cpp
     Notify.cpp
     ObjectIndex.cpp
@@ -581,12 +569,12 @@ set(TARGET_SRC
     ShaderLoader.cpp
     ShaderMerger.cpp
     ShaderUtils.cpp
-    SelectExtentTool.cpp
     SimplexNoise.cpp
     SpatialReference.cpp
     StateSetCache.cpp
     Status.cpp
     StringUtils.cpp
+    TaskService.cpp
     TDTiles.cpp
     Terrain.cpp
     TerrainOptions.cpp
@@ -611,7 +599,7 @@ set(TARGET_SRC
     TileCache.cpp
     TimeControl.cpp
     TraversalData.cpp
-    Threading.cpp
+    ThreadingUtils.cpp
     TMS.cpp
     Units.cpp
     URI.cpp
@@ -682,7 +670,7 @@ set(TARGET_SRC
     FeatureDisplayLayout.cpp
     FeatureElevationLayer.cpp
     FeatureImageLayer.cpp
-    TerrainConstraintLayer.cpp
+    FeatureMaskLayer.cpp
     FeatureModelGraph.cpp
     FeatureModelLayer.cpp
     FeatureModelSource.cpp
@@ -771,7 +759,6 @@ set(TARGET_SRC
     ModelNode.cpp
     PlaceNode.cpp
     TrackNode.cpp
-    WindLayer.cpp
 
     FileGDBFeatureSource.cpp
 
@@ -784,7 +771,7 @@ IF(Protobuf_FOUND AND Protobuf_PROTOC_EXECUTABLE)
   ELSE()
     INCLUDE_DIRECTORIES(${Protobuf_INCLUDE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
   ENDIF()
-
+  
   PROTOBUF_GENERATE_CPP(PROTO_VECTOR_TILE_CPP PROTO_VECTOR_TILE_H vector_tile.proto)
   SET(LIB_PUBLIC_HEADERS
     ${LIB_PUBLIC_HEADERS}
