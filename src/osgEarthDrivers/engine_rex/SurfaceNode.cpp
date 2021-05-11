@@ -205,6 +205,7 @@ const bool SurfaceNode::_enableDebugNodes = ::getenv("OSGEARTH_REX_DEBUG") != 0L
 
 SurfaceNode::SurfaceNode(const TileKey& tilekey, TileDrawable* drawable)
 {
+    setName(tilekey.str());
     _tileKey = tilekey;
 
     _drawable = drawable;
@@ -213,8 +214,7 @@ SurfaceNode::SurfaceNode(const TileKey& tilekey, TileDrawable* drawable)
     addChild(_drawable.get());
 
     // Establish a local reference frame for the tile:
-    GeoPoint centroid;
-    tilekey.getExtent().getCentroid(centroid);
+    GeoPoint centroid = tilekey.getExtent().getCentroid();
 
     osg::Matrix local2world;
     centroid.createLocalToWorld( local2world );

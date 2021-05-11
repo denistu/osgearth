@@ -73,8 +73,12 @@ _blacklist("Reg.BlackList(OE)")
     OGRRegisterAll();
     GDALAllRegister();
 
+#ifdef OSG_USE_UTF8_FILENAME
+    CPLSetConfigOption("GDAL_FILENAME_IS_UTF8","YES");
+#else
     // support Chinese character in the file name and attributes in ESRI's shapefile
     CPLSetConfigOption("GDAL_FILENAME_IS_UTF8","NO");
+#endif
     CPLSetConfigOption("SHAPE_ENCODING","");
 
 #if GDAL_VERSION_MAJOR>=3
@@ -83,6 +87,10 @@ _blacklist("Reg.BlackList(OE)")
 
     // Redirect GDAL/OGR console errors to our own handler
     CPLPushErrorHandler(myCPLErrorHandler);
+
+    // Set the GDAL shared block cache size. This defaults to 5% of
+    // available memory which is too high.
+    GDALSetCacheMax(40 * 1024 * 1024);
 
     // global initialization for CURL (not thread safe)
     HTTPClient::globalInit();
@@ -102,7 +110,10 @@ _blacklist("Reg.BlackList(OE)")
     _stateSetCache = new StateSetCache();
 
     // Default unref-after apply policy:
-    _unRefImageDataAfterApply = true;
+    _unRefImageDataAfterApply = false;
+
+    if (::getenv("OSGEARTH_DISABLE_UNREF_AFTER_APPLY"))
+        _unRefImageDataAfterApply = false;
 
     // Default object index for tracking scene object by UID.
     _objectIndex = new ObjectIndex();
@@ -185,7 +196,7 @@ _blacklist("Reg.BlackList(OE)")
     Units::registerAll( this );
 
     // Default concurrency for async image layers
-    JobArena::setSize("ASYNC_LAYER", 4u);
+    JobArena::setConcurrency("oe.layer.async", 4u);
 }
 
 Registry::~Registry()
@@ -194,6 +205,10 @@ Registry::~Registry()
     _global_geodetic_profile = 0L;
     _spherical_mercator_profile = 0L;
     _cube_profile = 0L;
+    // A heavy hammer, but at this stage, which is usually application
+    // shutdown, various osgEarth objects (e.g., VirtualPrograms) are
+    // in the OSG cache and will cause a crash when they are deleted later.
+    osgDB::Registry::instance()->clearObjectCache();
     OE_DEBUG << LC << "Registry shutdown complete.\n";
 
     // pop the custom error handler
@@ -227,7 +242,7 @@ Registry::instance(bool reset)
     {
         s_registryInit = true;
         s_registry = new Registry;
-        atexit(destroyRegistry);
+        std::atexit(destroyRegistry);
     }
 
     if (reset)
@@ -236,7 +251,7 @@ Registry::instance(bool reset)
         s_registry = new Registry();
     }
 
-    return s_registry.get(); // will return NULL on erase
+    return s_registry.get();
 }
 
 void

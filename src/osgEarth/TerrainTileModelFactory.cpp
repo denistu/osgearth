@@ -29,67 +29,79 @@
 
 #define LC "[TerrainTileModelFactory] "
 
+#define ARENA_ASYNC_LAYER "oe.layer.async"
+
 using namespace osgEarth;
 
-class FutureImage : public osg::Image
+namespace
 {
-public:
-
-    FutureImage(ImageLayer* layer, const TileKey& key) : osg::Image()
+    class FutureImage : public osg::Image
     {
-        _layer = layer;
-        _key = key;
-
-        osg::observer_ptr<ImageLayer> layer_ptr(_layer);
-
-        Job<const osg::Image> job([layer_ptr, key](Cancelable* progress) mutable {
-            osg::ref_ptr<ImageLayer> safe(layer_ptr);
-            if (safe.valid()) {
-                GeoImage result = safe->createImage(key, nullptr); // progress TODO
-                return result.takeImage();
-            }
-            else return static_cast<const osg::Image*>(nullptr);
-        });
-
-        _result = job.schedule("ASYNC_LAYER");
-    }
-
-    virtual bool requiresUpdateCall() const override
-    {
-        // tricky, because if we return false here, it will
-        // never get called again.
-        return _result.isAvailable() || !_result.isAbandoned();
-    }
-
-    virtual void update(osg::NodeVisitor* nv) override
-    {
-        if (_result.isAvailable())
+    public:
+        FutureImage(ImageLayer* layer, const TileKey& key) : osg::Image()
         {
-            // no refptr here because we are going to steal the data.
-            osg::ref_ptr<osg::Image> i = const_cast<osg::Image*>(_result.release());
+            _layer = layer;
+            _key = key;
 
-            if (i.valid())
+            osg::observer_ptr<ImageLayer> layer_ptr(_layer);
+
+            Job job(JobArena::get(ARENA_ASYNC_LAYER));
+
+            _result = job.dispatch<GeoImage>(
+                [layer_ptr, key](Cancelable* progress) mutable
+                {
+                    GeoImage result;
+                    osg::ref_ptr<ImageLayer> safe(layer_ptr);
+                    if (safe.valid())
+                    {
+                        result = safe->createImage(key, new ProgressCallback(progress));
+                    }
+                    return result;
+                }
+            );
+        }
+
+        bool requiresUpdateCall() const override
+        {
+            // tricky, because if we return false here, it will
+            // never get called again.
+            return _result.isAvailable() || !_result.isAbandoned();
+        }
+
+        void update(osg::NodeVisitor* nv) override
+        {
+            if (_result.isAvailable())
             {
-                this->setImage(
-                    i->s(), i->t(), i->r(),
-                    i->getInternalTextureFormat(), i->getPixelFormat(), i->getDataType(),
-                    i->data(), i->getAllocationMode(),
-                    i->getPacking(),
-                    i->getRowLength());
+                // fetch the result
+                GeoImage geoImage = _result.get();
+                osg::ref_ptr<osg::Image> i = geoImage.takeImage();
 
-                // since we stole the data, make sure we don't double-delete it
-                i->setAllocationMode(osg::Image::NO_DELETE);
+                if (i.valid())
+                {
+                    this->setImage(
+                        i->s(), i->t(), i->r(),
+                        i->getInternalTextureFormat(), i->getPixelFormat(), i->getDataType(),
+                        i->data(), i->getAllocationMode(),
+                        i->getPacking(),
+                        i->getRowLength());
 
-                // trigger texture(s) that own this image to reapply
-                this->dirty();
+                    // since we stole the data, make sure we don't double-delete it
+                    i->setAllocationMode(osg::Image::NO_DELETE);
+
+                    // trigger texture(s) that own this image to reapply
+                    this->dirty();
+                }
+
+                // reset the future so update won't be called again
+                _result.abandon();
             }
         }
-    }
 
-    osg::ref_ptr<ImageLayer> _layer;
-    TileKey _key;
-    Job<const osg::Image>::Result _result;
-};
+        osg::ref_ptr<ImageLayer> _layer;
+        TileKey _key;
+        Future<GeoImage> _result;
+    };
+}
 
 //.........................................................................
 
@@ -289,7 +301,7 @@ TerrainTileModelFactory::addImageLayer(
     osg::Texture* tex = 0L;
     TextureWindow window;
     osg::Matrix scaleBiasMatrix;
-        
+
     if (imageLayer->isKeyInLegalRange(key) && imageLayer->mayHaveData(key))
     {
         if (imageLayer->useCreateTexture())
@@ -313,6 +325,9 @@ TerrainTileModelFactory::addImageLayer(
             tex->setFilter(osg::Texture::MIN_FILTER, minFilter);
             tex->setMaxAnisotropy(4.0f);
             tex->setUnRefImageDataAfterApply(false);
+
+            // prevent issues with replacing the texture in the middle of a render
+            tex->setDataVariance(osg::Object::DYNAMIC);
         }
 
         else
@@ -325,6 +340,13 @@ TerrainTileModelFactory::addImageLayer(
                     tex = createCoverageTexture(geoImage.getImage());
                 else
                     tex = createImageTexture(geoImage.getImage(), imageLayer);
+
+                // Propagate the tracking token to the texture if there is one:
+                if (tex && geoImage.getTrackingToken())
+                {
+                    tex->getOrCreateUserDataContainer()->addUserObject(
+                        geoImage.getTrackingToken());
+                }
             }
         }
     }
@@ -340,7 +362,9 @@ TerrainTileModelFactory::addImageLayer(
 
     if (tex)
     {
-        tex->setName(model->getKey().str());
+        tex->setName(
+            model->getKey().str() + ":" +
+            (imageLayer->getName().empty() ? "(unnamed image layer)" : imageLayer->getName()));
 
         layerModel = new TerrainTileImageLayerModel();
 
@@ -566,6 +590,9 @@ TerrainTileModelFactory::addElevation(
             // Make a normal map if it doesn't already exist
             elevTex->generateNormalMap(map, &_workingSet, progress);
 
+            if (elevTex->getNormalMapTexture())
+                elevTex->getNormalMapTexture()->setName(key.str() + ":normalmap");
+
             // Made an image, so store this as a texture with no matrix.
             layerModel->setTexture( elevTex.get() );
 
@@ -667,7 +694,7 @@ TerrainTileModelFactory::addLandCover(
 
     if (tex)
     {
-        tex->setName(model->getKey().str());
+        tex->setName(model->getKey().str() + ":landcover");
 
         landCoverModel = new TerrainTileLandCoverModel();
         landCoverModel->setRevision(combinedRevision);
@@ -717,6 +744,9 @@ osg::Texture*
 TerrainTileModelFactory::createImageTexture(const osg::Image* image,
                                             const ImageLayer* layer) const
 {
+    if (image == nullptr || layer == nullptr)
+        return nullptr;
+
     osg::Texture* tex = nullptr;
     bool hasMipMaps = false;
     bool isCompressed = false;
@@ -760,15 +790,12 @@ TerrainTileModelFactory::createImageTexture(const osg::Image* image,
         {
             images[i]->setInternalTextureFormat(internalFormat);
         }
-        
+
         osg::ref_ptr<const osg::Image> compressed;
         for(auto& ref : images)
         {
             compressed = ImageUtils::compressImage(ref.get(), compressionMethod);
             ref = const_cast<osg::Image*>(ImageUtils::mipmapImage(compressed.get()));
-
-            if (layer->getCompressionMethod() == "gpu" && !compressed->isCompressed())
-                tex->setInternalFormatMode(tex->USE_S3TC_DXT5_COMPRESSION);
 
             hasMipMaps = compressed->isMipmap();
             isCompressed = compressed->isCompressed();
@@ -783,6 +810,9 @@ TerrainTileModelFactory::createImageTexture(const osg::Image* image,
             tex2dArray->setImage(i, const_cast<osg::Image*>(images[i].get()));
 
         tex = tex2dArray;
+
+        if (layer->getCompressionMethod() == "gpu" && !isCompressed)
+            tex->setInternalFormatMode(tex->USE_S3TC_DXT5_COMPRESSION);
     }
 
     tex->setDataVariance(osg::Object::STATIC);
@@ -816,7 +846,7 @@ TerrainTileModelFactory::createImageTexture(const osg::Image* image,
             break;
         }
     }
-    
+
     return tex;
 }
 

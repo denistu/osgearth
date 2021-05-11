@@ -52,21 +52,18 @@ static LabelControl*  s_resLabel    = 0L;
 static LabelControl*  s_asyncLabel  = 0L;
 static LabelControl*  s_asyncResLabel = 0L;
 static LabelControl*  s_asyncTimeLabel = 0L;
+static LabelControl*  s_xyzLabel = 0L;
 static ModelNode*     s_marker      = 0L;
-
 
 // An event handler that will print out the elevation at the clicked point
 struct QueryElevationHandler : public osgGA::GUIEventHandler
 {
     QueryElevationHandler()
         : _mouseDown( false ),
-          _terrain  ( s_mapNode->getTerrain() )
+          _terrain( s_mapNode->getTerrain() ),
+          _async(s_mapNode->getMap())
     {
-        _map = s_mapNode->getMap();
-        _path.push_back( s_mapNode->getTerrainEngine() );
-
-        // utility for asynchronous sampling requests
-        _async = new AsyncElevationSampler(_map);
+        _path.push_back( s_mapNode->getTerrainEngine()->getNode() );
     }
 
     void update( float x, float y, osgViewer::View* view )
@@ -131,6 +128,8 @@ struct QueryElevationHandler : public osgGA::GUIEventHandler
             isectPoint.fromWorld( _terrain->getSRS()->getGeodeticSRS(), world );
             s_mapLabel->setText( Stringify() << isectPoint.alt() << " m");
 
+            s_xyzLabel->setText(Stringify() << std::fixed << std::setprecision(1) << world.x() << "\n" << world.y() << "\n" << world.z());
+
             // and move the marker.
             s_marker->setPosition(mapPoint);
 
@@ -158,9 +157,9 @@ struct QueryElevationHandler : public osgGA::GUIEventHandler
             float seconds = osg::Timer::instance()->delta_s(_asyncSampleStart, end);
             Duration duration(seconds, Units::SECONDS);
 
-            osg::ref_ptr<RefElevationSample> sample = _asyncSample.release();
+            const ElevationSample& sample = _asyncSample.get();
 
-            if (!sample.valid() || !sample->hasData())
+            if (!sample.hasData())
             {
                 s_asyncLabel->setText("NO DATA");
             }
@@ -168,13 +167,15 @@ struct QueryElevationHandler : public osgGA::GUIEventHandler
             {
                 // want to express resolution in meters:
                 Distance cartesianResolution = _asyncSamplePoint.transformResolution(
-                    sample->resolution(),
+                    sample.resolution(),
                     Units::METERS);
 
-                s_asyncLabel->setText(sample->elevation().asString());
+                s_asyncLabel->setText(sample.elevation().asString());
                 s_asyncResLabel->setText(cartesianResolution.asString());
                 s_asyncTimeLabel->setText(duration.to(Units::MILLISECONDS).asString());
             }
+
+            _asyncSample.abandon();
         }
     }
 
@@ -202,7 +203,7 @@ struct QueryElevationHandler : public osgGA::GUIEventHandler
 
                 // Start the request. A resolution of 0.0 means please
                 // use the highest resolution available.
-                _asyncSample = _async->getSample(_asyncSamplePoint);
+                _asyncSample = _async.getSample(_asyncSamplePoint);
                 _asyncSampleStart = osg::Timer::instance()->tick();
             }
             else
@@ -211,7 +212,7 @@ struct QueryElevationHandler : public osgGA::GUIEventHandler
                 s_asyncResLabel->setText("");
                 s_asyncTimeLabel->setText("");
 
-                _asyncSample = Future<RefElevationSample>();
+                _asyncSample.abandon();
             }
         }
 
@@ -228,9 +229,9 @@ struct QueryElevationHandler : public osgGA::GUIEventHandler
     bool             _mouseDown;
     osg::NodePath    _path;
 
-    osg::ref_ptr<AsyncElevationSampler> _async;
+    AsyncElevationSampler _async;
     GeoPoint _asyncSamplePoint;
-    Future<RefElevationSample> _asyncSample;
+    Future<ElevationSample> _asyncSample;
     osg::Timer_t _asyncSampleStart;
 
     ElevationPool::WorkingSet _workingSet;
@@ -296,6 +297,7 @@ int main(int argc, char** argv)
     grid->setControl(0,r++,new LabelControl("Mouse (async) elevation:"));
     grid->setControl(0,r++,new LabelControl("Mouse (async) resolution:"));
     grid->setControl(0,r++,new LabelControl("Mouse (async) time:"));
+    grid->setControl(0, r++, new LabelControl("Geocentric coords:"));
     grid->setControl(0, r++, new ButtonControl("Click to remove all elevation data", new ClickToRemoveElevation()));
 
     r = 1;
@@ -309,6 +311,7 @@ int main(int argc, char** argv)
     s_asyncLabel = grid->setControl(1,r++, new LabelControl(""));
     s_asyncResLabel = grid->setControl(1,r++,new LabelControl(""));
     s_asyncTimeLabel = grid->setControl(1,r++,new LabelControl(""));
+    s_xyzLabel = grid->setControl(1, r++, new LabelControl(""));
 
     Style markerStyle;
     markerStyle.getOrCreate<ModelSymbol>()->url()->setLiteral("../data/axes.osgt.64.scale");

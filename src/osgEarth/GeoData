@@ -394,15 +394,20 @@ namespace osgEarth
         //! East-to-west span of the extent
         inline double width() const { return _width; }
 
+        //! East-to-est span in specified units
+        double width(const Units& units) const;
+
         //! North-to-south span of the extent
         inline double height() const { return _height; }
 
-        /**
-         * Gets the centroid of the bounds
-         */
-        bool getCentroid( double& out_x, double& out_y ) const;
-        osg::Vec3d getCentroid() const { osg::Vec3d r; getCentroid(r.x(), r.y()); return r; }
-        bool getCentroid( GeoPoint& output ) const;
+        //! North-to-south span in specified units
+        double height(const Units& units) const;
+
+        //! Gets the centroid of the bounds
+        GeoPoint getCentroid() const;
+
+        //! Legacy @deprecated
+        bool getCentroid(double& out_x, double& out_y) const;
 
         //! True if the extent is geographic and crosses the 180 degree meridian.
         bool crossesAntimeridian() const;
@@ -553,6 +558,11 @@ namespace osgEarth
          */
         osg::BoundingSphered createWorldBoundingSphere(double minElev, double maxElev) const;
 
+        /**
+         * Returns true if the extent is the entire Earth, for geographic
+         * extents. Otherwise returns false.
+         */
+        bool isWholeEarth() const;
     public:
         static GeoExtent INVALID;
 
@@ -623,7 +633,7 @@ namespace osgEarth
         GeoImage(const osg::Image* image, const GeoExtent& extent);
 
         //! Constructs a new goereferenced image from a future.
-        GeoImage(Future<const osg::Image> image, const GeoExtent& extent);
+        GeoImage(Future<osg::ref_ptr<osg::Image>> image, const GeoExtent& extent);
 
         /** dtor */
         virtual ~GeoImage() { }
@@ -699,21 +709,39 @@ namespace osgEarth
         /**
          * Returns the underlying OSG image and releases the reference pointer.
          */
-        const osg::Image* takeImage();
+        osg::ref_ptr<osg::Image> takeImage();
 
 		/**
 		 * Gets the units per pixel of this geoimage
 		 */
 		double getUnitsPerPixel() const;
 
+        //! Gets the coordinate at the image's s,t
+        bool getCoord(int s, int t, double& out_x, double& out_y) const;
+
+        //! Sets a token object in this GeoImage. You can use this to
+        //! keep a weak reference to the object after creating it,
+        //! for example to detect destruction.
+        void setTrackingToken(osg::Object* token);
+        osg::Object* getTrackingToken() const;
+
     private:
         GeoExtent _extent;
         Status _status;
         osg::ref_ptr<const osg::Image> _myimage;
-        mutable optional<Future<const osg::Image> > _future;
+        mutable optional<Future<osg::ref_ptr<osg::Image>>> _future;
+        osg::ref_ptr<osg::Object> _token;
     };
 
     typedef std::vector<GeoImage> GeoImageVector;
+
+    //typedef ImageUtils::ImageIteratorWithExtent<GeoExtent> GeoImageIterator;
+    struct GeoImageIterator : public ImageUtils::ImageIteratorWithExtent<GeoExtent>
+    {
+        GeoImageIterator(const GeoImage& im) :
+            ImageUtils::ImageIteratorWithExtent<GeoExtent>(
+                im.getImage(), im.getExtent()) { }
+    };
 
     /**
      * A georeferenced heightfield and associated normal/curvature map.

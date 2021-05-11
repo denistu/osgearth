@@ -53,13 +53,13 @@ namespace
         virtual ~OGRGeocodeImplementation();
 
     public: // GeocoderImplementation
-        osgEarth::Status search(const std::string& input, osg::ref_ptr<FeatureCursor>& output);
+        Status search(const std::string& input, osg::ref_ptr<FeatureCursor>& output);
 
         void setServiceOption(const std::string& key, const std::string& value);
 
     private:
         OGRGeocodingSessionH _session;
-        UnorderedMap<std::string,std::string> _options;
+        std::unordered_map<std::string, std::string> _options;
         void reset();
     };
 
@@ -86,10 +86,9 @@ namespace
             char** str = new char*[_options.size()+1];
             int c = 0;
             for(UnorderedMap<std::string, std::string>::const_iterator i = _options.begin(); i != _options.end(); ++i)
-            {                
+            {
                 buffers.push_back(i->first + "=" + i->second);
                 str[c++] = (char*)(buffers.back().c_str());
-                //str[c++] = (char*)i->second.c_str();
             }
             str[c] = 0L;
 
@@ -149,7 +148,7 @@ namespace
             {
                 osg::ref_ptr<FeatureCursor> cursor;
                 Status status = _impl->search(_input, cursor);
-                _promise.resolve(new Geocoder::OutputData(status, cursor.get()));
+                _promise.resolve(Geocoder::OutputData(status, cursor.get()));
             }
         }
     };
@@ -172,19 +171,22 @@ Geocoder::search(const std::string& input, const osgDB::Options* io_options)
 {
     if (_impl)
     {
-        osg::ref_ptr<ThreadPool> pool = ThreadPool::get(io_options);
-        if (pool.valid())
-        {
-            Promise<Geocoder::OutputData> promise;
-            GeocodeAsyncOperation* op = new GeocodeAsyncOperation(input, promise, _impl.get());
-            pool->run(op);
-            return Geocoder::Results(promise.getFuture());
-        }
-        else
+        auto geocode = [=](Cancelable* progress)
         {
             osg::ref_ptr<FeatureCursor> cursor;
             Status status = _impl->search(input, cursor);
-            return Geocoder::Results(status, cursor.get());
+            return OutputData(status, cursor.release());
+        };
+
+        std::shared_ptr<JobArena> arena;
+        if (ObjectStorage::get(io_options, arena))
+        {
+            Future<OutputData> out = Job(arena.get()).dispatch<OutputData>(geocode);
+            return Geocoder::Results(out);
+        }
+        else
+        {
+            return Geocoder::Results(geocode(nullptr));
         }
     }
     else
@@ -205,7 +207,7 @@ Geocoder::setImplementation(Geocoder::Implementation* impl)
 }
 
 Geocoder::Results::Results(const Status& status, FeatureCursor* cursor) :
-    FutureResult(new Geocoder::OutputData(status, cursor))
+    FutureResult(Geocoder::OutputData(status, cursor))
 {
     //NOP - error status
 }
@@ -216,14 +218,24 @@ Geocoder::Results::Results(Future<Geocoder::OutputData> data) :
     //NOP
 }
 
+Geocoder::Results::Results(const Geocoder::OutputData& data) :
+    FutureResult<Geocoder::OutputData>(data)
+{
+    //NOP
+}
+
 Status
 Geocoder::Results::getStatus()
 {
-    return _future.get() ? _future.get()->_status : Status(Status::ServiceUnavailable);
+    return _future.isAvailable() ?
+        _future.get()._status :
+        Status(Status::ServiceUnavailable, "Operation canceled");
 }
 
 FeatureCursor*
 Geocoder::Results::getFeatures()
 {
-    return _future.get() ? _future.get()->_cursor.get() : NULL;
+    return _future.isAvailable() ?
+        _future.get()._cursor.get() :
+        nullptr;
 }

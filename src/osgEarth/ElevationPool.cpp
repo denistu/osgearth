@@ -57,7 +57,7 @@ ElevationPool::StrongLRU::clear()
     while(!_lru.empty())
         _lru.pop();
 }
-    
+
 
 void
 ElevationPool::MapCallbackAdapter::onMapModelChanged(const MapModelChange& c)
@@ -104,7 +104,7 @@ ElevationPool::setMap(const Map* map)
     }
 
     _map = map;
-    
+
     if (map)
     {
         _mapCallback->_pool = this;
@@ -133,6 +133,8 @@ ElevationPool::sync(const Map* map, WorkingSet* ws)
 {
     if (_mapDataDirty)
     {
+        OE_PROFILING_ZONE;
+
         while(_workers > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -160,13 +162,13 @@ ElevationPool::refresh(const Map* map)
     if (_index)
         delete static_cast<MaxLevelIndex*>(_index);
 
-    map->getLayers(_elevationLayers);
+    map->getOpenLayers(_elevationLayers);
 
     MaxLevelIndex* index = new MaxLevelIndex();
     _index = index;
 
     double a_min[2], a_max[2];
-        
+
     for(auto i : _elevationLayers)
     {
         const ElevationLayer* layer = i.get();
@@ -208,7 +210,7 @@ ElevationPool::getLOD(double x, double y) const
     int maxiestMaxLevel = -1;
     for(auto h = hits.begin(); h != hits.end(); ++h)
     {
-        maxiestMaxLevel = osg::maximum(maxiestMaxLevel, (int)*h); 
+        maxiestMaxLevel = osg::maximum(maxiestMaxLevel, (int)*h);
     }
     return maxiestMaxLevel;
 }
@@ -235,63 +237,38 @@ ElevationPool::findExistingRaster(
     bool* fromWS,
     bool* fromL2,
     bool* fromLUT)
-{   
+{
+    OE_PROFILING_ZONE;
+
     *fromWS = false;
     *fromL2 = false;
     *fromLUT = false;
 
-#if 0
-    // First check the workingset. No mutex required since the
-    // LRU has its own mutex. (TODO: maybe just combine mutexes here)
-    if (ws)
-    {
-        WorkingSet::LRU::Record record;
-        if (ws->_lru.get(key, record))
-        {
-            OE_DEBUG << LC << key._tilekey.str() << " - Cache hit (Working set)" << std::endl;
-            output = record.value();
-            *fromWS = true;
-            return true;
-        }
-    }
-
-    if (_L2)
-    {
-        WorkingSet::LRU::Record record;
-        if (_L2->_lru.get(key, record))
-        {
-            OE_DEBUG << LC << key._tilekey.str() << " - Cache hit (L2 cache)" << std::endl;
-            output = record.value();
-            *fromL2 = true;
-            return true;
-        }
-    }
-#endif
-
     // Next check the system LUT -- see if someone somewhere else
     // already has it (the terrain or another WorkingSet)
     optional<Internal::RevElevationKey> orphanedKey;
-    _globalLUTMutex.read_lock();
-    OE_DEBUG << "Global LUT size = " << _globalLUT.size() << std::endl;
-    auto i =_globalLUT.find(key);
-    if (i != _globalLUT.end())
     {
-        i->second.lock(output);
-        if (output.valid())
+        ScopedReadLock lock(_globalLUTMutex);
+
+        auto i = _globalLUT.find(key);
+        if (i != _globalLUT.end())
         {
-            *fromLUT = true;
-        }
-        else
-        {
-            // observer was orphaned..remove it
-            orphanedKey = key;
+            i->second.lock(output);
+            if (output.valid())
+            {
+                *fromLUT = true;
+            }
+            else
+            {
+                // observer was orphaned..remove it
+                orphanedKey = key;
+            }
         }
     }
-    _globalLUTMutex.read_unlock();
 
     if (orphanedKey.isSet())
     {
-        Threading::ScopedWriteLock lock(_globalLUTMutex);
+        ScopedWriteLock lock(_globalLUTMutex);
         _globalLUT.erase(orphanedKey.get());
     }
 
@@ -306,7 +283,7 @@ ElevationPool::findExistingRaster(
 
 osg::ref_ptr<ElevationTexture>
 ElevationPool::getOrCreateRaster(
-    const Internal::RevElevationKey& key, 
+    const Internal::RevElevationKey& key,
     const Map* map,
     bool acceptLowerRes,
     WorkingSet* ws,
@@ -338,8 +315,8 @@ ElevationPool::getOrCreateRaster(
             ws && !ws->_elevationLayers.empty() ? ws->_elevationLayers :
             _elevationLayers;
 
-        for(keyToUse = key._tilekey; 
-            keyToUse.valid(); 
+        for(keyToUse = key._tilekey;
+            keyToUse.valid();
             keyToUse.makeParent())
         {
             populated = layersToSample.populateHeightField(
@@ -350,7 +327,7 @@ ElevationPool::getOrCreateRaster(
                 map->getElevationInterpolation(),
                 progress );
 
-            if ((populated == true) || 
+            if ((populated == true) ||
                 (acceptLowerRes == false) ||
                 (progress && progress->isCanceled()))
             {
@@ -400,7 +377,7 @@ ElevationPool::getOrCreateRaster(
     // update system weak-LUT:
     if (!fromLUT)
     {
-        Threading::ScopedWriteLock lock(_globalLUTMutex);
+        ScopedWriteLock lock(_globalLUTMutex);
         _globalLUT[key] = result.get();
     }
 
@@ -409,48 +386,212 @@ ElevationPool::getOrCreateRaster(
 
 namespace
 {
-    typedef vector_map<
-        Internal::RevElevationKey,
-        osg::ref_ptr<ElevationTexture> > QuickCache;
+    //typedef vector_map<
+    //    Internal::RevElevationKey,
+    //    osg::ref_ptr<ElevationTexture> > QuickCache;
 
-    struct QuickSampleVars {
-        double sizeS, sizeT;
-        double s, t;
-        double s0, s1, smix;
-        double t0, t1, tmix;
-        osg::Vec4f UL, UR, LL, LR, TOP, BOT;
-    };
+    //struct QuickSampleVars {
+    //    double sizeS, sizeT;
+    //    double s, t;
+    //    double s0, s1, smix;
+    //    double t0, t1, tmix;
+    //    osg::Vec4f UL, UR, LL, LR, TOP, BOT;
+    //};
 
     inline void quickSample(
-        const ImageUtils::PixelReader& reader, 
-        double u, double v, 
+        const ImageUtils::PixelReader& reader,
+        double u, double v,
         osg::Vec4f& out,
-        QuickSampleVars& a)
+        ElevationPool::Envelope::QuickSampleVars& a)
     {
-        double sizeS = (double)(reader.s()-1);
-        double sizeT = (double)(reader.t()-1);
+        const double sizeS = (double)(reader.s()-1);
+        const double sizeT = (double)(reader.t()-1);
 
         // u, v => [0..1]
-        double s = u * sizeS;
-        double t = v * sizeT;
+        const double s = u * sizeS;
+        const double t = v * sizeT;
 
-        double s0 = osg::maximum(floor(s), 0.0);
-        double s1 = osg::minimum(s0 + 1.0, sizeS);
-        double smix = s0 < s1 ? (s - s0) / (s1 - s0) : 0.0;
+        const double s0 = std::max(floor(s), 0.0);
+        const int intS0 = s0;
+        const double s1 = std::min(s0 + 1.0, sizeS);
+        const int intS1 = s1;
+        const double smix = s0 < s1 ? (s - s0) / (s1 - s0) : 0.0;
 
-        double t0 = osg::maximum(floor(t), 0.0);
-        double t1 = osg::minimum(t0 + 1.0, sizeT);
-        double tmix = t0 < t1 ? (t - t0) / (t1 - t0) : 0.0;
+        const double t0 = std::max(floor(t), 0.0);
+        const int intT0 = t0;
+        const double t1 = std::min(t0 + 1.0, sizeT);
+        const int intT1 = t1;
+        const double tmix = t0 < t1 ? (t - t0) / (t1 - t0) : 0.0;
 
-        reader(a.UL, (int)s0, (int)t0, 0, 0); // upper left
-        reader(a.UR, (int)s1, (int)t0, 0, 0); // upper right
-        reader(a.LL, (int)s0, (int)t1, 0, 0); // lower left
-        reader(a.LR, (int)s1, (int)t1, 0, 0); // lower right
+        reader(a.UL, intS0, intT0, 0, 0); // upper left
+        reader(a.UR, intS1, intT0, 0, 0); // upper right
+        reader(a.LL, intS0, intT1, 0, 0); // lower left
+        reader(a.LR, intS1, intT1, 0, 0); // lower right
 
-        a.TOP = a.UL * (1.0f - smix) + a.UR * smix;
-        a.BOT = a.LL * (1.0f - smix) + a.LR * smix;
-        out = a.TOP * (1.0f - tmix) + a.BOT * tmix;
+        const double minusSmix = 1.0 - smix;
+        const double minusTmis = 1.0 - tmix;
+
+        a.TOP = a.UL * minusSmix + a.UR * smix;
+        a.BOT = a.LL * minusSmix + a.LR * smix;
+        out = a.TOP * minusTmis + a.BOT * tmix;
     }
+}
+
+bool
+ElevationPool::prepareEnvelope(
+    ElevationPool::Envelope& env,
+    const GeoPoint& refPoint,
+    const Distance& resolution,
+    WorkingSet* ws)
+{
+    env._pool = this;
+    env._map = nullptr;
+    env._profile = nullptr;
+
+    if (_map.lock(env._map) == false || env._map->getProfile() == nullptr)
+        return false;
+
+    env._profile = env._map->getProfile();
+
+    sync(env._map.get(), ws);
+
+    env._key._revision = getElevationRevision(env._map.get());
+
+    env._raster = nullptr;
+    env._cache.clear();
+
+    env._pw = env._profile->getExtent().width();
+    env._ph = env._profile->getExtent().height();
+    env._pxmin = env._profile->getExtent().xMin();
+    env._pymin = env._profile->getExtent().yMin();
+
+    const Units& units = env._map->getSRS()->getUnits();
+    Distance pointRes(0.0, units);
+
+    GeoPoint refPointMap = refPoint.transform(env._map->getSRS());
+
+    double resolutionInMapUnits = resolution.asDistance(units, refPointMap.y());
+
+    int maxLOD = env._profile->getLevelOfDetailForHorizResolution(
+        resolutionInMapUnits,
+        ELEVATION_TILE_SIZE);
+
+    env._lod = osg::minimum(getLOD(refPointMap.x(), refPointMap.y()), (int)maxLOD);
+
+    //TODO: Fix this mess, doesn't work for insets.
+    if (env._lod < 0)
+        env._lod = 0;
+
+    env._profile->getNumTiles(env._lod, env._tw, env._th);
+
+    env._ws = ws;
+
+    if (env._ws == nullptr)
+        env._ws = &env._default_ws;
+
+    return true;
+}
+
+int
+ElevationPool::Envelope::sampleMapCoords(
+    std::vector<osg::Vec3d>& points,
+    ProgressCallback* progress)
+{
+    OE_PROFILING_ZONE;
+
+    if (points.empty())
+        return -1;
+
+    ScopedAtomicCounter counter(_pool->_workers);
+
+    //TODO: TESTING..?
+    //ws = NULL;
+
+    double u, v;
+    double rx, ry;
+    int tx, ty;
+    int tx_prev = INT_MAX, ty_prev = INT_MAX;
+    float lastRes = -1.0f;
+    int lod = _lod;
+    int lod_prev = INT_MAX;
+    osg::Vec4f elev;
+    int count = 0;
+
+    for (auto& p : points)
+    {
+        {
+            //OE_PROFILING_ZONE_NAMED("createTileKey");
+
+            rx = (p.x() - _pxmin) / _pw, ry = (p.y() - _pymin) / _ph;
+            tx = osg::clampBelow((unsigned)(rx * (double)_tw), _tw - 1u); // TODO: wrap around for geo
+            ty = osg::clampBelow((unsigned)((1.0 - ry) * (double)_th), _th - 1u);
+
+            if (lod != lod_prev || tx != tx_prev || ty != ty_prev)
+            {
+                _key._tilekey = TileKey(lod, tx, ty, _profile.get());
+                lod_prev = lod;
+                tx_prev = tx;
+                ty_prev = ty;
+            }
+        }
+
+        if (_key._tilekey.valid())
+        {
+            auto iter = _cache.find(_key);
+
+            if (iter == _cache.end())
+            {
+                _raster = _pool->getOrCreateRaster(
+                    _key,   // key to query
+                    _map.get(), // map to query
+                    true,  // fall back on lower resolution data if necessary
+                    _ws,    // user's workingset
+                    progress);
+
+                // bail on cancelation before using the quickcache
+                if (progress && progress->isCanceled())
+                {
+                    return -1;
+                }
+
+                _cache[_key] = _raster.get();
+            }
+            else
+            {
+                _raster = iter->second;
+            }
+
+            {
+                //OE_PROFILING_ZONE_NAMED("sample");
+                if (_raster.valid())
+                {
+                    u = (p.x() - _raster->getExtent().xMin()) / _raster->getExtent().width();
+                    v = (p.y() - _raster->getExtent().yMin()) / _raster->getExtent().height();
+
+                    // Note: This can happen on the map edges..
+                    // TODO: consider looping around for geo and clamping for projected
+                    u = osg::clampBetween(u, 0.0, 1.0);
+                    v = osg::clampBetween(v, 0.0, 1.0);
+
+                    quickSample(_raster->reader(), u, v, elev, _vars);
+                    p.z() = elev.r();
+                }
+                else
+                {
+                    p.z() = NO_DATA_VALUE;
+                }
+            }
+        }
+        else
+        {
+            p.z() = NO_DATA_VALUE;
+        }
+
+        if (p.z() != NO_DATA_VALUE)
+            ++count;
+    }
+
+    return count;
 }
 
 int
@@ -486,8 +627,8 @@ ElevationPool::sampleMapCoords(
 
     int count = 0;
 
-    QuickCache quickCache;
-    QuickSampleVars qvars;
+    Envelope::QuickCache quickCache;
+    Envelope::QuickSampleVars qvars;
 
     //TODO: TESTING..?
     //ws = NULL;
@@ -543,7 +684,7 @@ ElevationPool::sampleMapCoords(
                 ty_prev = ty;
             }
         }
-        
+
         if (key._tilekey.valid())
         {
             auto iter = quickCache.find(key);
@@ -637,19 +778,16 @@ ElevationPool::sampleMapCoords(
 
     int count = 0;
 
-    QuickCache quickCache;
-    QuickSampleVars qvars;
-
-    //TODO: TESTING..?
-    //ws = NULL;
+    Envelope::QuickCache quickCache;
+    Envelope::QuickSampleVars qvars;
 
     unsigned tw, th;
     double rx, ry;
     int tx, ty;
     int tx_prev = INT_MAX, ty_prev = INT_MAX;
     float lastRes = -1.0f;
-    unsigned lod;
-    unsigned lod_prev = INT_MAX;
+    int lod;
+    int lod_prev = INT_MAX;
     const Units& units = map->getSRS()->getUnits();
     Distance pointRes(0.0, units);
 
@@ -670,7 +808,7 @@ ElevationPool::sampleMapCoords(
     for(auto& p : points)
     {
         {
-            OE_PROFILING_ZONE_NAMED("createTileKey");
+            //OE_PROFILING_ZONE_NAMED("createTileKey");
 
             rx = (p.x()-pxmin)/pw, ry = (p.y()-pymin)/ph;
             tx = osg::clampBelow((unsigned)(rx * (double)tw), tw-1u ); // TODO: wrap around for geo
@@ -712,7 +850,7 @@ ElevationPool::sampleMapCoords(
             }
 
             {
-                OE_PROFILING_ZONE_NAMED("sample");
+                //OE_PROFILING_ZONE_NAMED("sample");
                 if (raster.valid())
                 {
                     u = (p.x() - raster->getExtent().xMin()) /  raster->getExtent().width();
@@ -746,9 +884,9 @@ ElevationPool::sampleMapCoords(
 
 ElevationSample
 ElevationPool::getSample(
-    const GeoPoint& p, 
-    unsigned maxLOD, 
-    const Map* map, 
+    const GeoPoint& p,
+    unsigned maxLOD,
+    const Map* map,
     WorkingSet* ws,
     ProgressCallback* progress)
 {
@@ -762,7 +900,7 @@ ElevationPool::getSample(
     maxLOD = osg::minimum(maxLOD, static_cast<unsigned>(std::numeric_limits<int>::max()));
     int lod = osg::minimum( getLOD(p.x(), p.y()), (int)maxLOD );
     if (lod >= 0)
-    {   
+    {
         key._tilekey = map->getProfile()->createTileKey(p.x(), p.y(), lod);
         key._revision = getElevationRevision(map);
 
@@ -783,8 +921,8 @@ ElevationPool::getSample(
 
 ElevationSample
 ElevationPool::getSample(
-    const GeoPoint& p, 
-    WorkingSet* ws, 
+    const GeoPoint& p,
+    WorkingSet* ws,
     ProgressCallback* progress)
 {
     if (!p.isValid())
@@ -808,8 +946,8 @@ ElevationPool::getSample(
 
 ElevationSample
 ElevationPool::getSample(
-    const GeoPoint& p, 
-    const Distance& resolution, 
+    const GeoPoint& p,
+    const Distance& resolution,
     WorkingSet* ws,
     ProgressCallback* progress)
 {
@@ -864,8 +1002,8 @@ ElevationPool::getTile(
     key._revision = getElevationRevision(map.get());
 
     out_tex = getOrCreateRaster(
-        key, 
-        _map.get(), 
+        key,
+        _map.get(),
         acceptLowerRes,
         ws,
         progress);
@@ -883,7 +1021,7 @@ namespace osgEarth { namespace Internal
         GeoPoint _p;
         Distance _res;
         ElevationPool::WorkingSet* _ws;
-        Promise<RefElevationSample> _promise;
+        Promise<ElevationSample> _promise;
 
         SampleElevationOp(osg::observer_ptr<const Map> map, const GeoPoint& p, const Distance& res, ElevationPool::WorkingSet* ws) :
             _map(map), _p(p), _res(res), _ws(ws), _promise(OE_MUTEX_NAME) { }
@@ -896,12 +1034,12 @@ namespace osgEarth { namespace Internal
                 if (_map.lock(map))
                 {
                     ElevationSample sample = map->getElevationPool()->getSample(_p, _res, _ws);
-                    _promise.resolve(new RefElevationSample(sample.elevation(), sample.resolution()));
+                    _promise.resolve(sample);
                     return;
                 }
             }
 
-            _promise.resolve(NULL);
+            _promise.resolve();
         }
     };
 }}
@@ -910,24 +1048,42 @@ AsyncElevationSampler::AsyncElevationSampler(
     const Map* map,
     unsigned numThreads) :
 
-    _map(map)
+    _map(map),
+    _arena("oe.AsyncElevationSampler", numThreads)
 {
-    _threadPool = new ThreadPool("osgEarth.ElevationPool", numThreads);
+    //nop
 }
 
-Future<RefElevationSample>
+Future<ElevationSample>
 AsyncElevationSampler::getSample(const GeoPoint& p)
 {
     return getSample(p, Distance(0, p.getXYUnits()));
 }
 
-Future<RefElevationSample>
+Future<ElevationSample>
 AsyncElevationSampler::getSample(
-    const GeoPoint& p,
+    const GeoPoint& point,
     const Distance& resolution)
 {
-    Internal::SampleElevationOp* op = new Internal::SampleElevationOp(_map, p, resolution, &_ws);
-    Future<RefElevationSample> result = op->_promise.getFuture();
-    _threadPool->run(op);
-    return result;
+    return Job(&_arena).dispatch<ElevationSample>(
+        [=](Cancelable* cancelable)
+        {
+            ElevationSample sample;
+            if (cancelable == nullptr || !cancelable->isCanceled())
+            {
+                osg::ref_ptr<const Map> map(_map);
+                if (map.valid())
+                {
+                    osg::ref_ptr<ProgressCallback> progress = new ProgressCallback(cancelable);
+
+                    sample = map->getElevationPool()->getSample(
+                        point,
+                        resolution,
+                        &_ws,
+                        progress.get());
+                }
+            }
+            return sample;
+        }
+    );
 }

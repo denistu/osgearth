@@ -23,9 +23,17 @@
 using namespace osgEarth;
 
 ProgressCallback::ProgressCallback() :
-osg::Referenced( true ),
-_canceled      ( false ),
-_retryDelay_s  ( 0.0f )
+    _canceled(false),
+    _retryDelay_s(0.0f),
+    _cancelable(nullptr)
+{
+    //NOP
+}
+
+ProgressCallback::ProgressCallback(Cancelable* cancelable) :
+    _canceled(false),
+    _retryDelay_s(0.0f),
+    _cancelable(cancelable)
 {
     //NOP
 }
@@ -45,8 +53,14 @@ ProgressCallback::reset()
 bool
 ProgressCallback::isCanceled() const
 {
-    if (!_canceled && shouldCancel())
-        _canceled = true;
+    if (!_canceled)
+    {
+        if ((shouldCancel()) ||
+            (_cancelable && _cancelable->isCanceled()))
+        {
+            _canceled = true;
+        }
+    }
     return _canceled;
 }
 
@@ -61,40 +75,6 @@ bool ProgressCallback::reportProgress(double             current,
                                       unsigned           numStages,
                                       const std::string& msg )
 {
-    return false;
-}
-
-/******************************************************************************/
-ConsoleProgressCallback::ConsoleProgressCallback() :
-ProgressCallback()
-{
-    //NOP
-}
-
-void
-ConsoleProgressCallback::reportError(const std::string& msg)
-{
-    ProgressCallback::reportError(msg);
-    OE_NOTICE << "Error: " << msg << std::endl;
-}
-
-bool
-ConsoleProgressCallback::reportProgress(double current, double total, 
-                                        unsigned stage, unsigned numStages,
-                                        const std::string& msg)
-{
-    if (total > 0)
-    {
-        double percentComplete = (current / total) * 100.0;
-        OE_NOTICE 
-            << "Stage " << (stage+1) << "/" << numStages 
-            << "; completed " << percentComplete << "% " << current << " of " << total 
-            << std::endl;
-    }
-    else
-    {
-        OE_NOTICE << msg << std::endl;
-    }
     return false;
 }
 

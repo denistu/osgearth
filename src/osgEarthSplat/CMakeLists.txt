@@ -16,10 +16,14 @@ set(TARGET_GLSL
     Splat.vert.view.glsl
     Splat.frag.glsl
     Splat.util.glsl
-    GroundCover.CS.glsl
-    GroundCover.Billboard.glsl
-    GroundCover.Model.glsl
-    Grass.glsl)
+    Splat.GroundCover.CS.glsl
+    Splat.GroundCover.Sort.CS.glsl
+    Splat.GroundCover.Billboard.glsl
+    Splat.GroundCover.Model.glsl
+    Splat.GroundCover.Generate.CS.glsl
+    Splat.GroundCover.Render.glsl
+    Splat.GroundCover.Types.glsl
+    Splat.Grass.glsl)
 
 set(SHADERS_CPP "${CMAKE_CURRENT_BINARY_DIR}/AutoGenShaders.cpp")
 
@@ -43,6 +47,7 @@ set(TARGET_SRC
     SplatLayer.cpp
     Surface.cpp
     Zone.cpp
+    OldInstanceCloud.cpp
     ${SHADERS_CPP})
 	
 set(LIB_PUBLIC_HEADERS
@@ -58,7 +63,8 @@ set(LIB_PUBLIC_HEADERS
     SplatShaders
     SplatLayer
     Surface
-    Zone)
+    Zone
+    OldInstanceCloud)
 	
 SET(TARGET_H
 	${LIB_PUBLIC_HEADERS}
@@ -87,7 +93,7 @@ IF (TRACY_FOUND)
     LINK_WITH_VARIABLES(${LIB_NAME} TRACY_LIBRARY)
 ENDIF(TRACY_FOUND)
 
-LINK_WITH_VARIABLES(${LIB_NAME} OSG_LIBRARY OSGUTIL_LIBRARY OSGSIM_LIBRARY OSGDB_LIBRARY OSGVIEWER_LIBRARY OSGTEXT_LIBRARY OSGGA_LIBRARY OSGSHADOW_LIBRARY OPENTHREADS_LIBRARY)
+LINK_WITH_VARIABLES(${LIB_NAME} OSG_LIBRARY OSGUTIL_LIBRARY OSGDB_LIBRARY)
 LINK_CORELIB_DEFAULT(${LIB_NAME} ${CMAKE_THREAD_LIBS_INIT} ${MATH_LIBRARY})
 
 # Add this project to the NodeKits solution folder

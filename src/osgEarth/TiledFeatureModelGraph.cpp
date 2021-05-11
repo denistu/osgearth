@@ -55,9 +55,9 @@ TiledFeatureModelGraph::createCursor(FeatureSource* fs, FilterContext& cx, const
 {
     NetworkMonitor::ScopedRequestLayer layerRequest(_ownerName);
     FeatureCursor* cursor = fs->createFeatureCursor(query, progress);
-    if (_filterChain.valid())
+    if (cursor && _filterChain.valid())
     {
-        cursor = new FilteredFeatureCursor(cursor, _filterChain.get(), cx);
+        cursor = new FilteredFeatureCursor(cursor, _filterChain.get(), &cx);
     }
     return cursor;
 }
@@ -65,6 +65,9 @@ TiledFeatureModelGraph::createCursor(FeatureSource* fs, FilterContext& cx, const
 osg::ref_ptr<osg::Node>
 TiledFeatureModelGraph::createNode(const TileKey& key, ProgressCallback* progress)
 {
+    if (progress && progress->isCanceled())
+        return nullptr;
+
     NetworkMonitor::ScopedRequestLayer layerRequest(_ownerName);
     // Get features for this key
     Query query;
@@ -83,10 +86,18 @@ TiledFeatureModelGraph::createNode(const TileKey& key, ProgressCallback* progres
     if (progress && progress->isCanceled())
         return nullptr;
 
-    osg::ref_ptr< FeatureCursor > cursor = _features->createFeatureCursor(query, progress);
+    osg::ref_ptr< FeatureCursor > cursor = _features->createFeatureCursor(
+        query,
+        _filterChain.get(),
+        &fc,
+        progress);
+
     osg::ref_ptr<osg::Node> node = new osg::Group;
     if (cursor)
     {
+        if (progress && progress->isCanceled())
+            return nullptr;
+
         FeatureList features;
         cursor->fill(features);
 
@@ -166,5 +177,6 @@ TiledFeatureModelGraph::createNode(const TileKey& key, ProgressCallback* progres
         }
     }
 
-    return node;
+    return node->getBound().valid() ? node : nullptr;
+    //return node;
 }

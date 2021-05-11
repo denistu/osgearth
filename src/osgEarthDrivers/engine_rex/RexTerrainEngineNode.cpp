@@ -135,6 +135,8 @@ RexTerrainEngineNode::RexTerrainEngineNode() :
     _frameLastUpdated(0u)
 {
     // Necessary for pager object data
+    // Note: Do not change this value. Apps depend on it to
+    // detect being inside a terrain traversal.
     this->setName("osgEarth.RexTerrainEngineNode");
 
     // unique ID for this engine:
@@ -168,6 +170,8 @@ RexTerrainEngineNode::RexTerrainEngineNode() :
     _cachedLayerExtentsComputeRequired = true;
     ADJUST_UPDATE_TRAV_COUNT(this, +1);
     ADJUST_EVENT_TRAV_COUNT(this, +1);
+
+    _updatedThisFrame = false;
 }
 
 RexTerrainEngineNode::~RexTerrainEngineNode()
@@ -212,7 +216,7 @@ void
 RexTerrainEngineNode::shutdown()
 {
     TerrainEngineNode::shutdown();
-    _loader->clear();
+    _merger->clear();
 }
 
 void
@@ -283,41 +287,29 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
     this->addChild(_releaser.get());
 
     // A shared geometry pool.
-    _geometryPool = new GeometryPool(options());
+    _geometryPool = new GeometryPool();
     _geometryPool->setReleaser( _releaser.get());
     this->addChild( _geometryPool.get() );
 
-    // Make a tile loader
-    PagerLoader* loader = new PagerLoader( this );
-    loader->setFrameClock(&_clock);
-    loader->setNumLODs(options().maxLOD().getOrUse(DEFAULT_MAX_LOD));
-    loader->setMergesPerFrame(options().mergesPerFrame().get() );
-    loader->setOverallPriorityScale(options().priorityScale().get());
+    // Geometry compiler/merger
+    _merger = new Merger();
+    _merger->setMergesPerFrame(options().mergesPerFrame().get());
+    this->addChild(_merger.get());
 
-    _loader = loader;
-    this->addChild( _loader.get() );
-
-    // if the envvar for tile expiration is set, override the options setting
-    unsigned expirationThreshold = options().expirationThreshold().get();
-    const char* val = ::getenv("OSGEARTH_EXPIRATION_THRESHOLD");
-    if (val)
-    {
-        expirationThreshold = as<unsigned>(val, options().expirationThreshold().get());
-        OE_INFO << LC << "Expiration threshold set by env var = " << options().expirationThreshold().get() << "\n";
-    }
+    // Loader concurrency (size of the thread pool)
+    unsigned concurrency = options().concurrency().get();
+    const char* concurrency_str = ::getenv("OSGEARTH_TERRAIN_CONCURRENCY");
+    if (concurrency_str)
+        concurrency = Strings::as<unsigned>(concurrency_str, concurrency);
+    JobArena::setConcurrency(ARENA_LOAD_TILE, concurrency);
 
     // Make a tile unloader
     _unloader = new UnloaderGroup( _liveTiles.get() );
     _unloader->setFrameClock(&_clock);
-    _unloader->setCacheSize(expirationThreshold);
     _unloader->setMaxAge(options().minExpiryTime().get());
     _unloader->setMaxTilesToUnloadPerFrame(options().maxTilesToUnloadPerFrame().get());
     _unloader->setMinimumRange(options().minExpiryRange().get());
-    //_unloader->setReleaser(_releaser.get());
     this->addChild( _unloader.get() );
-
-    // Tile rasterizer in case we need one
-    //_rasterizer = new TileRasterizer();
 
     // Initialize the core render bindings.
     setupRenderBindings();
@@ -340,7 +332,7 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
         map,
         this, // engine
         _geometryPool.get(),
-        _loader.get(),
+        _merger.get(),
         _liveTiles.get(),
         _renderBindings,
         options(),
@@ -352,12 +344,16 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
 
     _selectionInfo.initialize(
         0u, // always zero, not the terrain options firstLOD
-        osg::minimum(options().maxLOD().get(), maxLOD ),
+        maxLOD,
         map->getProfile(),
         options().minTileRangeFactor().get(),
         true); // restrict polar subdivision for geographic maps
 
-               // set up the initial graph
+    TerrainResources* res = getResources();
+    for(unsigned lod=0; lod<=maxLOD; ++lod)
+        res->setVisibilityRangeHint(lod, _selectionInfo.getLOD(lod)._visibilityRange);
+
+    // set up the initial graph
     refresh();
 
     // now that we have a map, set up to recompute the bounds
@@ -388,6 +384,11 @@ RexTerrainEngineNode::invalidateRegion(
 
         // Add the entire map to the manifest :)
         CreateTileManifest manifest;
+
+        // When updating a subset of layers, override progressive mode
+        // so that the visible LOD gets updated first:
+        manifest.setProgressive(false);
+
         LayerVector layers;
         _map->getLayers(layers);
         for(LayerVector::const_iterator i=layers.begin(); i != layers.end(); ++i)
@@ -479,6 +480,7 @@ RexTerrainEngineNode::setupRenderBindings()
     color.samplerName() = "oe_layer_tex";
     color.matrixName()  = "oe_layer_texMatrix";
     color.setDefaultTexture(new osg::Texture2D(ImageUtils::createEmptyImage(1, 1)));
+    color.getDefaultTexture()->setName("rex default color");
     getResources()->reserveTextureImageUnit( color.unit(), "Terrain Color" );
 
     SamplerBinding& elevation = _renderBindings[SamplerBinding::ELEVATION];
@@ -486,6 +488,7 @@ RexTerrainEngineNode::setupRenderBindings()
     elevation.samplerName() = "oe_tile_elevationTex";
     elevation.matrixName()  = "oe_tile_elevationTexMatrix";
     elevation.setDefaultTexture(osgEarth::createEmptyElevationTexture());
+    elevation.getDefaultTexture()->setName("rex default elevation");
     if (this->elevationTexturesRequired())
         getResources()->reserveTextureImageUnit( elevation.unit(), "Terrain Elevation" );
 
@@ -494,6 +497,7 @@ RexTerrainEngineNode::setupRenderBindings()
     normal.samplerName() = "oe_tile_normalTex";
     normal.matrixName()  = "oe_tile_normalTexMatrix";
     normal.setDefaultTexture(osgEarth::createEmptyNormalMapTexture());
+    normal.getDefaultTexture()->setName("rex default normalmap");
     if (this->normalTexturesRequired())
         getResources()->reserveTextureImageUnit( normal.unit(), "Terrain Normals" );
 
@@ -509,6 +513,7 @@ RexTerrainEngineNode::setupRenderBindings()
     landCover.samplerName() = "oe_tile_landCoverTex";
     landCover.matrixName()  = "oe_tile_landCoverTexMatrix";
     landCover.setDefaultTexture(LandCover::createEmptyTexture());
+    landCover.getDefaultTexture()->setName("rex default landcover");
     if (this->landCoverTexturesRequired())
         getResources()->reserveTextureImageUnit(landCover.unit(), "Terrain Land Cover");
     getOrCreateStateSet()->setDefine("OE_LANDCOVER_TEX", landCover.samplerName());
@@ -541,7 +546,7 @@ RexTerrainEngineNode::dirtyTerrain()
     }
 
     // clear the loader:
-    _loader->clear();
+    _merger->clear();
 
     // clear out the tile registry:
     if ( _liveTiles.valid() )
@@ -564,6 +569,12 @@ RexTerrainEngineNode::dirtyTerrain()
     // can use its observer_ptr back to the terrain engine.
     this->ref();
 
+    // Load all the root key tiles.
+    JobGroup loadGroup;
+    Job load;
+    load.setArena(ARENA_LOAD_TILE);
+    load.setGroup(&loadGroup);
+
     for( unsigned i=0; i<keys.size(); ++i )
     {
         TileNode* tileNode = new TileNode();
@@ -578,39 +589,23 @@ RexTerrainEngineNode::dirtyTerrain()
         // Post-add initialization:
         tileNode->initializeData();
 
-        // And load the tile's data synchronously (only for root tiles)
-        tileNode->loadSync();
+        // And load the tile's data
+        load.dispatch([tileNode](Cancelable*) {
+                tileNode->loadSync();
+            });
 
         OE_DEBUG << " - " << (i+1) << "/" << keys.size() << " : " << keys[i].str() << std::endl;
     }
+
+    // wait for all loadSync calls to complete
+    loadGroup.join();
 
     // release the self-ref.
     this->unref_nodelete();
 
     // Set up the state sets.
     updateState();
-
-    // Call the base class
-    TerrainEngineNode::dirtyTerrain();
 }
-
-namespace
-{
-    // debugging
-    struct CheckForOrphans : public TileNodeRegistry::ConstOperation {
-        void operator()( const TileNodeRegistry::TileTable& tiles ) const {
-            unsigned count = 0;
-            for(TileNodeRegistry::TileTable::const_iterator i = tiles.begin(); i != tiles.end(); ++i ) {
-                if ( i->second._tile->referenceCount() == 1 ) {
-                    count++;
-                }
-            }
-            if ( count > 0 )
-                OE_WARN << LC << "Oh no! " << count << " orphaned tiles in the reg" << std::endl;
-        }
-    };
-}
-
 
 void
 RexTerrainEngineNode::dirtyState()
@@ -637,8 +632,6 @@ void
 RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
 {
     OE_PROFILING_ZONE;
-
-    _clock.cull();
 
     osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>(&nv);
 
@@ -780,7 +773,7 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
 
     // traverse all the other children (geometry pool, loader/unloader, etc.)
     _geometryPool->accept(nv);
-    _loader->accept(nv);
+    _merger->accept(nv);
     _unloader->accept(nv);
     _releaser->accept(nv);
 }
@@ -790,20 +783,15 @@ RexTerrainEngineNode::event_traverse(osg::NodeVisitor& nv)
 {
     OE_PROFILING_ZONE;
 
-    unsigned osgFrame = nv.getFrameStamp()->getFrameNumber();
-    bool newFrame = (osgFrame > _clock.getFrame());
-    if (newFrame)
+    // Update the cached layer extents as necessary.
+    osg::ref_ptr<const Layer> layer;
+    for (auto& layerExtent : _cachedLayerExtents)
     {
-        // Update the cached layer extents as necessary.
-        osg::ref_ptr<const Layer> layer;
-        for (auto& layerExtent : _cachedLayerExtents)
+        layerExtent.second._layer.lock(layer);
+        if (layer.valid() && layer->getRevision() > layerExtent.second._revision)
         {
-            layerExtent.second._layer.lock(layer);
-            if (layer.valid() && layer->getRevision() > layerExtent.second._revision)
-            {
-                layerExtent.second._extent = _map->getProfile()->clampAndTransformExtent(layer->getExtent());
-                layerExtent.second._revision = layer->getRevision();
-            }
+            layerExtent.second._extent = _map->getProfile()->clampAndTransformExtent(layer->getExtent());
+            layerExtent.second._revision = layer->getRevision();
         }
     }
 }
@@ -813,30 +801,29 @@ RexTerrainEngineNode::update_traverse(osg::NodeVisitor& nv)
 {
     OE_PROFILING_ZONE;
 
-    unsigned osgFrame = nv.getFrameStamp()->getFrameNumber();
-    bool newFrame = (osgFrame > _clock.getFrame());
-
-    // prevent from running more than once per frame
-    if (newFrame)
+    if (_renderModelUpdateRequired)
     {
-        // advance the frame clock for this new frame.
-        _clock.update();
+        PurgeOrphanedLayers visitor(getMap(), _renderBindings);
+        _terrain->accept(visitor);
+        _renderModelUpdateRequired = false;
+    }
 
-        if (_renderModelUpdateRequired)
-        {
-            PurgeOrphanedLayers visitor(getMap(), _renderBindings);
-            _terrain->accept(visitor);
-            _renderModelUpdateRequired = false;
-        }
+    // Called once on the first update pass to ensure that all existing
+    // layers have their extents cached properly
+    if (_cachedLayerExtentsComputeRequired)
+    {
+        cacheAllLayerExtentsInMapSRS();
+        _cachedLayerExtentsComputeRequired = false;
+        ADJUST_UPDATE_TRAV_COUNT(this, -1);
+    }
 
-        // Called once on the first update pass to ensure that all existing
-        // layers have their extents cached properly
-        if (_cachedLayerExtentsComputeRequired)
-        {
-            cacheAllLayerExtentsInMapSRS();
-            _cachedLayerExtentsComputeRequired = false;
-            ADJUST_UPDATE_TRAV_COUNT(this, -1);
-        }
+    // Call update() on all open layers
+    LayerVector layers;
+    _map->getLayers(layers);
+    for (auto& layer : layers)
+    {
+        if (layer->isOpen())
+            layer->update(nv);
     }
 }
 
@@ -851,12 +838,18 @@ RexTerrainEngineNode::traverse(osg::NodeVisitor& nv)
 
     else if (nv.getVisitorType() == nv.UPDATE_VISITOR)
     {
-        update_traverse(nv);
-        TerrainEngineNode::traverse( nv );
+        if (!_updatedThisFrame.exchange(true))
+        {
+            _clock.update();
+            update_traverse(nv);
+            TerrainEngineNode::traverse(nv);
+        }
     }
 
     else if ( nv.getVisitorType() == nv.CULL_VISITOR )
     {
+        _updatedThisFrame.exchange(false);
+        _clock.cull();
         cull_traverse(nv);
     }
 
@@ -900,8 +893,7 @@ osg::Node* renderHeightField(const GeoHeightField& geoHF)
 {
     osg::MatrixTransform* mt = new osg::MatrixTransform;
 
-    GeoPoint centroid;
-    geoHF.getExtent().getCentroid(centroid);
+    GeoPoint centroid = geoHF.getExtent().getCentroid();
 
     osg::Matrix world2local, local2world;
     centroid.createWorldToLocal( world2local );
@@ -1095,6 +1087,7 @@ RexTerrainEngineNode::addTileLayer(Layer* tileLayer)
                         {
                             tex = new osg::Texture2D(ImageUtils::createEmptyImage(1,1));
                         }
+                        tex->setName("default:" + imageLayer->getName());
                         tex->setUnRefImageDataAfterApply(Registry::instance()->unRefImageDataAfterApply().get());
                         terrainSS->addUniform(new osg::Uniform(newBinding.samplerName().c_str(), newBinding.unit()));
                         terrainSS->setTextureAttribute(newBinding.unit(), tex.get(), 1);
@@ -1254,8 +1247,9 @@ RexTerrainEngineNode::updateState()
             package.load(surfaceVP, package.ENGINE_TESSELLATION);
             //package.load(surfaceVP, package.ENGINE_GEOM);
 
-            // Default screen space error = 50 pixels
-            surfaceStateSet->addUniform(new osg::Uniform("oe_terrain_sse", 50.0f));
+            // Default tess level
+            surfaceStateSet->addUniform(new osg::Uniform("oe_terrain_tess", 3.0f));
+            surfaceStateSet->addUniform(new osg::Uniform("oe_terrain_tess_range", 150.0f));
 
 #ifdef HAVE_PATCH_PARAMETER
             // backwards compatibility

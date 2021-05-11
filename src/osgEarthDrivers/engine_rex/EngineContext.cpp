@@ -18,7 +18,6 @@
 */
 #include "EngineContext"
 #include "TileNodeRegistry"
-#include <osgEarth/TraversalData>
 #include <osgEarth/CullingUtils>
 #include <osgEarth/Registry>
 
@@ -35,7 +34,7 @@ using namespace osgEarth;
 EngineContext::EngineContext(const Map*                     map,
                              TerrainEngineNode*             terrainEngine,
                              GeometryPool*                  geometryPool,
-                             Loader*                        loader,
+                             Merger*                        merger,
                              TileNodeRegistry*              liveTiles,
                              const RenderBindings&          renderBindings,
                              const TerrainOptions&          options,
@@ -44,7 +43,7 @@ EngineContext::EngineContext(const Map*                     map,
 _map           ( map ),
 _terrainEngine ( terrainEngine ),
 _geometryPool  ( geometryPool ),
-_loader        ( loader ),
+_merger        ( merger ),
 _liveTiles     ( liveTiles ),
 _renderBindings( renderBindings ),
 _options       ( options ),

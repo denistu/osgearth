@@ -19,6 +19,8 @@
 * You should have received a copy of the GNU Lesser General Public License
 * along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
+#include <osgEarth/ImGui/ImGui>
+#include <imgui_internal.h>
 
 #include <osgViewer/CompositeViewer>
 #include <osgEarth/EarthManipulator>
@@ -39,6 +41,7 @@ usage(const char* name)
         << "\nUsage: " << name << " file.earth"
         << "\n          --views [num] : Number of windows to open"
         << "\n          --shared      : Use a shared graphics context"
+        << "\n          --updates [num] : Number of update traversals"
         << "\n"
         << MapNodeHelper().usage() << std::endl;
 
@@ -51,23 +54,24 @@ struct App
     bool _sharedGC;
     int _size;
     osg::ref_ptr<osg::Node> _node;
+    osg::ref_ptr<MapNode> _mapNode;
 
     App(osg::ArgumentParser& args) :
         _viewer(args),
-        _size(500)
+        _size(800)
     {
         _viewer.setThreadingModel(_viewer.SingleThreaded);
         _sharedGC = args.read("--shared");
     }
 
-    void addView()
+    void addView(const std::string& name)
     {
         int i = _viewer.getNumViews();
 
         int x = 10 + i*(_size + 20);
         osg::GraphicsContext* gc_to_share = _sharedGC && i > 0 ? _viewer.getView(0)->getCamera()->getGraphicsContext() : nullptr;
 
-        osgViewer::View* view = createView(x, 10, _size, _size, gc_to_share);
+        osgViewer::View* view = createView(name, x, 10, _size, _size, gc_to_share);
 
         view->setCameraManipulator(new EarthManipulator());
         view->setSceneData(_node.get());
@@ -76,12 +80,13 @@ struct App
         _viewer.addView(view);
     }
 
-    osgViewer::View* createView(int x, int y, int width, int height, osg::GraphicsContext* sharedGC)
+    osgViewer::View* createView(const std::string& name, int x, int y, int width, int height, osg::GraphicsContext* sharedGC)
     {
         osg::ref_ptr<osg::DisplaySettings>& ds = osg::DisplaySettings::instance();
         osg::ref_ptr<osg::GraphicsContext::Traits> traits = new osg::GraphicsContext::Traits(ds.get());
         traits->readDISPLAY();
         if (traits->displayNum < 0) traits->displayNum = 0;
+        traits->screenNum = 1;
         traits->x = x;
         traits->y = y;
         traits->width = width;
@@ -91,6 +96,7 @@ struct App
         traits->sharedContext = sharedGC;
 
         osg::GraphicsContext* gc = osg::GraphicsContext::createGraphicsContext(traits.get());
+        gc->setName(name);
 
         osgViewer::View* view = new osgViewer::View();
         view->getCamera()->setGraphicsContext(gc);
@@ -103,7 +109,6 @@ struct App
         view->getCamera()->setReadBuffer(buffer);
         
         return view;
-            
     }
 
     void releaseGLObjects()
@@ -113,28 +118,96 @@ struct App
     }
 };
 
-
-struct AddWindow : public osgGA::GUIEventHandler
+struct GCPanel : public GUI::BaseGUI
 {
     App& _app;
-    bool _sharedGC;
-    int _size;
+    GCPanel(App& app) : GUI::BaseGUI("Graphics Contexts"), _app(app) { }
 
-    AddWindow(App& app) :
-        _app(app)
-    { }
-
-    bool handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa) override
+    void draw(osg::RenderInfo& ri) override
     {
-        if (ea.getEventType() == ea.KEYUP && ea.getKey() == ea.KEY_N)
+        if (!isVisible()) return;
+        ImGui::Begin(name(), visible());
+        auto gcs = osg::GraphicsContext::getAllRegisteredGraphicsContexts();
+        for (auto gc : gcs)
         {
-            _app.addView();
-            return true;
+            if (gc->getState() != nullptr)
+            {
+                ImGui::Text("Context ID = %d", gc->getState()->getContextID());
+                ImGui::Indent();
+                ImGui::Text("Name = %s", gc->getName());
+                ImGui::Text("Operations = %d", gc->getGraphicsThread() && gc->getGraphicsThread()->getOperationQueue() ? gc->getGraphicsThread()->getOperationQueue()->getNumOperationsInQueue() : 0);
+                ImGui::Text("Size = %d x %d", gc->getTraits() ? gc->getTraits()->width : -1, gc->getTraits() ? gc->getTraits()->height : -1);
+                if (ImGui::Button("release GL objects"))
+                {
+                    _app._viewer.releaseGLObjects(gc->getState());
+                }
+                ImGui::Unindent();
+            }
         }
-        return false;
+
+        if (ImGui::Button("New window"))
+        {
+            std::string name = Stringify() << "Window " << _app._viewer.getNumViews();
+            _app.addView(name);
+        }
+
+        ImGui::End();
     }
 };
 
+struct ViewerPanel : public GUI::BaseGUI
+{
+    App& _app;
+    ViewerPanel(App& app) : GUI::BaseGUI("Views"), _app(app) { }
+
+    void draw(osg::RenderInfo& ri) override
+    {
+        if (!isVisible()) return;
+        ImGui::Begin(name(), visible());
+
+        if (ImGui::Button("New view"))
+        {
+            std::string name = Stringify() << "View " << _app._viewer.getNumViews();
+            _app.addView(name);
+        }
+
+        if (ImGui::Button("Release GL Objects"))
+        {
+            _app._viewer.releaseGLObjects(nullptr);
+        }
+
+        ImGui::Text("Active Views");
+        osgViewer::ViewerBase::Views views;
+        _app._viewer.getViews(views);
+        int ptr = 0;
+        for (auto view : views)
+        {
+            ImGui::PushID(view);
+            ImGui::Text("View #%d", ptr++);
+            ImGui::Indent();
+
+            if (view->getCamera() && view->getCamera()->getGraphicsContext() && view->getCamera()->getGraphicsContext()->getState())
+            {
+                ImGui::Text("GC = %d", view->getCamera()->getGraphicsContext()->getState()->getContextID());
+            }
+            else
+            {
+                ImGui::Text("**Invalid**");
+            }
+
+            if (ImGui::Button("close"))
+            {
+                OE_WARN << "Closing a view" << std::endl;
+                _app._viewer.removeView(view);
+            }
+
+            ImGui::Unindent();
+            ImGui::PopID();
+        }            
+
+        ImGui::End();
+    }
+};
 
 int
 main(int argc, char** argv)
@@ -152,26 +225,53 @@ main(int argc, char** argv)
     int numViews = 1;
     arguments.read("--views", numViews);
 
+    int numUpdates = 1;
+    arguments.read("--updates", numUpdates);
+
+
     // create a viewer:
     App app(arguments);
 
-    app._node = MapNodeHelper().load(arguments, &app._viewer);
+    // Setup the viewer for imgui
+    app._viewer.setRealizeOperation(new GUI::ApplicationGUI::RealizeOperation);
+
+    app._node = MapNodeHelper().loadWithoutControls(arguments, &app._viewer);
     if (!app._node.get())
         return usage(argv[0]);
 
+    app._mapNode = MapNode::get(app._node.get());
+
     for(int i=0; i<numViews; ++i)
     {
-        app.addView();
+        app.addView(Stringify() << "View " << i);
     }
 
-    EventRouter* router = new EventRouter();
-    app._viewer.getView(0)->addEventHandler(router);
+    auto view = app._viewer.getView(0);
+
+    // install the Gui.
+    GUI::ApplicationGUI* gui = new GUI::ApplicationGUI();
+    gui->addAllBuiltInTools();
+    gui->add(new ViewerPanel(app), true);
+    gui->add(new GCPanel(app), true);
+    view->getEventHandlers().push_front(gui);
 
     OE_NOTICE << "Press 'n' to create a new view" << std::endl;
-    router->onKeyPress(EventRouter::KEY_N, [&]() { app.addView(); });
+    EventRouter::get(view).onKeyPress(EventRouter::KEY_N, [&]() { 
+        app.addView(Stringify()<<"View " << app._viewer.getNumViews()); });
 
     OE_NOTICE << "Press 'r' to call releaseGLObjects" << std::endl;
-    router->onKeyPress(EventRouter::KEY_R, [&]() { app.releaseGLObjects(); });
+    EventRouter::get(view).onKeyPress(EventRouter::KEY_R, [&]() { 
+        app.releaseGLObjects(); });
 
-    return app._viewer.run();
+    app._viewer.realize();
+
+    while (!app._viewer.done())
+    {
+        app._viewer.advance();
+        app._viewer.eventTraversal();
+        for (int i = 0; i < numUpdates; ++i)
+            app._viewer.updateTraversal();
+        app._viewer.renderingTraversals();
+    }
+    return 0;
 }

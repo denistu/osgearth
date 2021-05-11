@@ -28,6 +28,7 @@
 #include <osgEarth/Threading>
 #include <osg/Camera>
 #include <osg/ObserverNodePath>
+#include <queue>
 
 namespace osgEarth { namespace Util
 {
@@ -41,7 +42,7 @@ namespace osgEarth { namespace Util
     public:
         struct Entry
         {            
-            osg::ref_ptr<osg::Group>     _node;
+            osg::observer_ptr<DrapeableNode> _node;
             osg::ref_ptr<osg::RefMatrix> _matrix;
             osg::ObserverNodePath        _path;
             int                          _frame;
@@ -54,18 +55,19 @@ namespace osgEarth { namespace Util
         /** Pushes a node and its matrix into the cull set */
         void push(DrapeableNode* node, const osg::NodePath& path, const osg::FrameStamp* stamp);
 
-        /** Runs a node visitor on the cull set, clearing it when complete */
+        /** Runs a node visitor on the cull set, optionally popping as it goes along. */
         void accept(osg::NodeVisitor& nv);
 
-        /** Bounds of this set */
-        const osg::BoundingSphere& getBound() const { return _bs; }
-
-        /** Number of elements in the set */
-        unsigned size() const { return _entries.size(); }
+        //! Bounds of the latest set
+        const osg::BoundingSphere& getBound() const;
 
     private:
-        std::vector<Entry>  _entries;
-        osg::BoundingSphere _bs;
+        struct FrameData {
+            std::vector<Entry> _entries;
+            osg::BoundingSphere _bs;
+        };
+        std::map<int, FrameData> _data;
+        Threading::Mutex _data_mutex;
     };
 
     /**

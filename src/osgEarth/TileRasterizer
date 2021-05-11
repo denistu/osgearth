@@ -34,17 +34,16 @@
 
 namespace osgEarth
 {
+    using namespace Threading;
+
     /**
     * Render node graphs to textures, one at a time.
     */
-    class OSGEARTH_EXPORT TileRasterizer : public osg::Referenced
+    class OSGEARTH_EXPORT TileRasterizer : public osg::Node
     {
     public:
         //! Construct a new tile rasterizer camera
         TileRasterizer(unsigned width, unsigned height);
-
-        //! Whether the rasterizer initialized properly and is valid for use.
-        bool valid() const;
 
         /**
         * Schedule a rasterization to an osg::Image.
@@ -53,46 +52,54 @@ namespace osgEarth
         * @param extent geospatial extent of the node to render.
         * @return Future image - blocks on .get() or .release()
         */
-        Threading::Future<osg::Image> render(osg::Node* node, const GeoExtent& extent);
+        Future<osg::ref_ptr<osg::Image>> render(
+            osg::Node* node, 
+            const GeoExtent& extent);
 
         //! destructor
         virtual ~TileRasterizer();
 
-        osg::Node* getNode() const;
+    public: // osg::Node
+
+        void traverse(osg::NodeVisitor& nv) override;
 
     private:
 
-        struct RenderData {
-            bool _initialized;
-            osg::ref_ptr<osgUtil::SceneView> _sv;
-            mutable osg::buffered_object<GLuint> _samplesQuery;
-            mutable osg::buffered_object<GLuint> _pbo;
-            osg::observer_ptr<osg::GraphicsContext> _gc;
-            unsigned _width, _height;
-        };
 
-        struct RenderOperation : public osg::GraphicsOperation {
-            RenderOperation(osg::Node* node, const GeoExtent& extent, RenderData& renderData);
-            Threading::Future<osg::Image> getFuture();
-            void operator () (osg::GraphicsContext* context);
+        struct RenderJob
+        {
             osg::ref_ptr<osg::Node> _node;
             GeoExtent _extent;
-            osg::ref_ptr<osg::Image> _image;
-            Threading::Promise<osg::Image> _promise;
-            RenderData& _renderData;
-            int _pass;
-            bool _async;
+            Promise<osg::ref_ptr<osg::Image>> _promise;
+        };
+        Mutexed<std::queue<RenderJob*>> _queue;
+
+        struct RenderContext
+        {
+            RenderContext() : _samplesQuery(0), _pbo(0) { }
+            osg::ref_ptr<osgUtil::SceneView> _sv;
+            GLuint _samplesQuery;
             GLuint _pbo;
+            unsigned _width, _height;
+            osg::ref_ptr<osg::Texture2D> _tex;
+            osg::ref_ptr<osg::Camera> _rtt;
+            GLuint _samples;
+            std::atomic_bool _rttActive;
+            RenderJob* _activeJob;
+        };
+        mutable std::shared_ptr<RenderContext> _cx;
+
+        // simple adapter to make draw callbacks smoother
+        struct DrawCallback : public osg::Camera::DrawCallback
+        {
+            DrawCallback(std::function<void(osg::RenderInfo&)> func) : _func(func) { }
+            std::function<void(osg::RenderInfo&)> _func;
+            void operator()(osg::RenderInfo& ri) const override { _func(ri); }
+            friend class TileRasterizer;
         };
 
-        struct RenderInstaller : public osg::Drawable {
-            RenderInstaller(RenderData& renderData);
-            void drawImplementation(osg::RenderInfo& ri) const;
-            RenderData& _renderData;
-        };
-
-        RenderData _renderData;
-        osg::ref_ptr<osg::Drawable> _installer;
+        void preDraw(osg::RenderInfo& ri);
+        void postDraw(osg::RenderInfo& ri);
     };
 
 } // namespace osgEarth

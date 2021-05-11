@@ -25,10 +25,8 @@
 #include <osgEarth/VirtualProgram>
 #include <osg/NodeVisitor>
 #include <osg/Drawable>
-
-namespace osg {
-    class TextureBuffer;
-}
+#include <osg/Geometry>
+#include <osg/TextureBuffer>
 
 /**
  * Some utilities to support *DrawInstanced rendering.
@@ -39,18 +37,26 @@ namespace osgEarth { namespace Util
 
     namespace DrawInstanced
     {
-        /**
-        * Referenced-counted vector of instance matrices. These are stored
-        * in the node that's been instanced so the app can recover the 
-        * original positioning data.
-        */
-        class MatrixRefVector : public InlineVector<osg::Matrixf,osg::Object>
+        class OSGEARTH_EXPORT InstanceGeometry : public osg::Geometry
         {
         public:
-            META_Object(osgEarth,MatrixRefVector);
-            MatrixRefVector() : InlineVector<osg::Matrixf,osg::Object>() { }
-        protected:
-            MatrixRefVector(const MatrixRefVector& rhs, const osg::CopyOp& op) { }
+            InstanceGeometry();
+            InstanceGeometry(const osg::Geometry& geometry);
+            InstanceGeometry(const InstanceGeometry&, const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
+            META_Node(osgEarth::Util::DrawInstanced, InstanceGeometry);
+
+            const std::vector< osg::Matrixf >& getMatrices() const;
+            void setMatrices(const std::vector< osg::Matrixf >& matrices);
+
+            virtual bool supports(const osg::PrimitiveFunctor& f) const { return true; }
+            virtual void accept(osg::PrimitiveFunctor& f) const;
+
+            virtual osg::BoundingBox computeBoundingBox() const;
+
+        private:
+            std::vector<osg::Matrixf> _matrices;
+            std::vector<osg::Vec3> _mesh;
+            osg::ref_ptr< osg::DrawElementsUInt > _meshDrawElements;
         };
 
         /**
@@ -67,7 +73,6 @@ namespace osgEarth { namespace Util
                 */
             ConvertToDrawInstanced(
                 unsigned                numInstances,
-                const osg::BoundingBox& bbox,
                 bool                    optimize,
                 osg::TextureBuffer*     tbo,
                 int                     firstTboUnit);
@@ -81,7 +86,6 @@ namespace osgEarth { namespace Util
 
         protected:
             unsigned _numInstances;
-            osg::BoundingBox _bbox;
             bool _optimize;
             std::list<osg::PrimitiveSet*> _primitiveSets;
             osg::TextureBuffer* _tbo;
@@ -107,15 +111,8 @@ namespace osgEarth { namespace Util
             * NOTE: You must also call install(StateSet) to activate instancing.
             * @return false If instancing is not available
             */
-        extern OSGEARTH_EXPORT bool convertGraphToUseDrawInstanced( 
+        extern OSGEARTH_EXPORT bool convertGraphToUseDrawInstanced(
             osg::Group* graph );
-
-        /**
-            * Gets the vector of instance matrices attached to a node,
-            * or NULL if not found.
-            */
-        extern OSGEARTH_EXPORT const MatrixRefVector* getMatrixVector(
-            osg::Node* node );
     }
 } }
 

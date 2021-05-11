@@ -20,7 +20,6 @@
 #include "TileNode"
 #include "SurfaceNode"
 #include "SelectionInfo"
-#include <osgEarth/TraversalData>
 #include <osgEarth/VisibleLayer>
 #include <osgEarth/Shadowing>
 
@@ -34,7 +33,8 @@ _camera(0L),
 _currentTileNode(0L),
 _orphanedPassesDetected(0u),
 _cv(cullVisitor),
-_context(context)
+_context(context),
+_layerExtents(nullptr)
 {
     setVisitorType(CULL_VISITOR);
     setTraversalMode(TRAVERSE_ALL_CHILDREN);
@@ -47,8 +47,10 @@ _context(context)
     pushProjectionMatrix(_cv->getProjectionMatrix());
     pushModelViewMatrix(_cv->getModelViewMatrix(), _cv->getCurrentCamera()->getReferenceFrame());
     setLODScale(_cv->getLODScale());
+    setUserDataContainer(_cv->getUserDataContainer());
     _camera = _cv->getCurrentCamera();
-    _isSpy = VisitorData::isSet(*cullVisitor, "osgEarth.Spy");
+    bool temp;
+    _isSpy = cullVisitor->getUserValue("osgEarth.Spy", temp);
 
     // skip surface nodes is this is a shadow camera and shadowing is disabled.
     _acceptSurfaceNodes =

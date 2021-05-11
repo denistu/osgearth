@@ -18,11 +18,13 @@
  */
 
 #include <osgEarth/FileUtils>
+#include <osgEarth/Registry>
 #include <osgEarth/StringUtils>
 #include <osgEarth/Threading>
 #include <osgDB/FileUtils>
 #include <osgDB/FileNameUtils>
 #include <osgDB/ConvertUTF>
+#include <osg/Object>
 #include <stack>
 
 #include <errno.h>
@@ -177,19 +179,17 @@ osgEarth::Util::isRelativePath(const std::string& fileName)
 std::string
 osgEarth::Util::getFullPath(const std::string& relativeTo, const std::string &relativePath)
 {
-    // A cache, since this method uses osgDB::getRealPath which can be quite slow.
-    static Threading::Mutex s_cacheMutex(OE_MUTEX_NAME);
-    typedef std::map<std::string, std::string> PathCache;
-    static PathCache s_cache;
+    static std::unordered_map<std::string, std::string> s_cache;
+    static std::mutex s_cache_mutex;
     //static float tries = 0, hits = 0;
 
     std::string cacheKey = relativeTo + "&" + relativePath;
 
-    Threading::ScopedMutexLock lock(s_cacheMutex);
+    std::lock_guard<std::mutex> lock(s_cache_mutex);
 
     //tries += 1.0f;
 
-    PathCache::const_iterator i = s_cache.find(cacheKey);
+    auto i = s_cache.find(cacheKey);
     if (i != s_cache.end())
     {
         //hits += 1.0f;
@@ -271,6 +271,9 @@ osgEarth::Util::getFullPath(const std::string& relativeTo, const std::string &re
     s_cache[cacheKey] = result;
     return result;
 }
+
+// force getFullPath's statics to be initialized at startup
+OSG_INIT_SINGLETON_PROXY(osgEarthFileUtilsGetFullPathInitSingletonProxy, osgEarth::Util::getFullPath(std::string(), std::string()));
 
 bool
 osgEarth::Util::isArchive(const std::string& path)

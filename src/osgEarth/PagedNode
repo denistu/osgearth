@@ -24,72 +24,266 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/optional>
+#include <osgEarth/Threading>
+#include <osgEarth/URI>
+#include <osgEarth/SceneGraphCallback>
+#include <osgEarth/Utils>
+#include <osgEarth/LoadableNode>
+
 #include <osg/PagedLOD>
+#include <osg/LOD>
+
+#include <queue>
+#include <list>
+#include <memory>
+#include <iterator>
+#include <unordered_map>
 
 namespace osgEarth { namespace Util
 {
+    using namespace osgEarth;
+    using namespace osgEarth::Threading;
+
     /**
-     * PagedNode is a group with a self-contained paged child.
-     * It wraps the details of a PagedNode node into a container
-     * that is easier to manage.
-     *
-     * To use, override the class. Call setNode() with the default
-     * node to display, and implement loadChild() to load the 
-     * paged child node when it comes within range. Set the page-in
-     * range for the paged child node with setRange() and setRangeMode().
-     * Finally, call setupPaging() to complete setup.
+     * Internal node type to handle on-demand loading and unloading
+     * of content.
+     * A PagedNode2 must have a PagingManager as a scene graph ancestor.
      */
-    class OSGEARTH_EXPORT PagedNode : public osg::Group
+    class OSGEARTH_EXPORT PagedNode2 : 
+        public osg::Group, 
+        public osgEarth::LoadableNode
     {
     public:
-        PagedNode();
+        //! Type of function used to load content.
+        using Loader = std::function<osg::ref_ptr<osg::Node>(Cancelable*)>;
 
-        //! Sets the node to display by default when children
-        //! are not loaded.
-        void setNode(osg::Node* node);
+    public:
+        //! Construct an empty paged node
+        PagedNode2();
 
-        //! Override to load paged child node
-        virtual osg::Node* loadChild() { return 0L; }
+        //! Function to run to load the asychronous child
+        void setLoadFunction(const Loader& value) {
+            _load = value;
+        }
+        const Loader& getLoadFunction() const {
+            return _load;
+        }
 
-        //! Bounding sphere of paged data
-        virtual osg::BoundingSphere getChildBound() const;
+        //! Set the center of this node, which is necessary since we
+        //! cannot compute the bounding sphere before the asynchronous load
+        void setCenter(const osg::Vec3& value) {
+            _userBS->center() = value;
+        }
+        const osg::Vec3& getCenter() const {
+            return _userBS->center();
+        }
 
-        //! Returns true by default; override for custom behavior
-        virtual bool hasChild() const;
+        //! Set the radius of this node's bounding sphere, which is necessary
+        //! since we cannot compute the bounding sphere before the asynchronous load
+        void setRadius(float value) {
+            _userBS->radius() = value;
+        }
+        float getRadius() const {
+            return _userBS->radius();
+        }
 
-        //! Call this after setting up your data on the attach point
-        void setupPaging();
+        //! Minimum distance from camera at which to render.
+        void setMinRange(float value) {
+            _minRange = value, _useRange = true;
+        }
 
-        /**
-         * Gets the range factor
-         */
-        float getRangeFactor() const { return _rangeFactor; }
+        float getMinRange() const {
+            return _minRange;
+        }
 
-        /**
-         * Sets the range factor
-         */
-        void setRangeFactor(float rangeFactor) { _rangeFactor = rangeFactor; }
+        //! Maximum distance from camera at which to render
+        void setMaxRange(float value) {
+            _maxRange = value, _useRange = true;
+        }
+        float getMaxRange() const {
+            return _maxRange;
+        }
 
-        //! Sets the page-in rage mode (distance v. pixel-size; default is distance)
-        void setRangeMode(const osg::LOD::RangeMode);
+        //! Minimum pixel extent at which to render.
+        void setMinPixels(float value) {
+            _minPixels = value, _useRange = false;
+        }
+        float getMinPixels() const {
+            return _minPixels;
+        }
 
-        //! Sets the range (or pixel size) at which to page in the child data.
-        void setRange(float range) { _range = range; }
+        //! Maximum pixel extent at which to render.
+        void setMaxPixels(float value) {
+            _maxPixels = value, _useRange = false;
+        }
+        float getMaxPixels() const {
+            return _maxPixels;
+        }
 
-        //! Gets whether this node is additive.
-        bool getAdditive() const { return _additive; }
+        //! Multiple the load job's priority by this number
+        void setPriorityScale(float value) {
+            _priorityScale = value;
+        }
+        float getPriorityScale() const {
+            return _priorityScale;
+        }
 
-        //! Sets whether the child replaces the default node (non-additive)
-        //! or renders alongside the default node (additive)
-        void setAdditive(bool value) { _additive = value; }
+        //! Pre- and post-merge callbacks for the async data
+        void setSceneGraphCallbacks(SceneGraphCallbacks* value) {
+            _callbacks = value;
+        }
+        SceneGraphCallbacks* getSceneGraphCallbacks() const {
+            return _callbacks.get();
+        }
+
+        //! Whether to continue rendering the normal children after
+        //! the asynchronous node becomes visible
+        //! Default value = REFINE_REPLACE
+        void setRefinePolicy(RefinePolicy value) {
+            _refinePolicy = value;
+        }
+        RefinePolicy getRefinePolicy() const {
+            return _refinePolicy;
+        }
+
+        //! Whether to pre-compile GL objects before merging
+        void setPreCompileGLObjects(bool value) {
+            _preCompile = value;
+        }
+        bool getPreCompileGLObjects() const {
+            return _preCompile;
+        }
+
+        //! Whether this node will automatically unload its content
+        //! when it goes not pass cull.
+        bool getAutoUnload() const  {
+            return _autoUnload;
+        }
+        void setAutoUnload(bool value)  {
+            _autoUnload = value;
+        }
+
+        bool isHighestResolution() const;
+
+        //! Loads the content for this node
+        void load(
+            float priority,
+            const osg::Object* host);
+
+        //! Loads the content for this node (convenience function)
+        void load() {
+            load(0.0, nullptr);
+        }
+
+        //! Unloads the content for this node
+        void unload();
+
+        //! Whether the content is loaded.
+        bool isLoaded() const;
+
+        //! Mark the content as "in use" so that it will not
+        //! be removed if setAutoUnload is true.
+        void touch();
+
+
+    public: // osg::Node overrides
+
+        virtual void traverse(osg::NodeVisitor& nv) override;
+
+        virtual osg::BoundingSphere computeBound() const override;
 
     protected:
-        osg::Group* _attachPoint;
-        osg::PagedLOD* _plod;
-        bool _additive;
-        optional<float> _range;
-        float _rangeFactor;
-    };    
+
+        virtual ~PagedNode2();
+
+    private:
+        friend class PagingManager;
+
+        struct Loaded {
+            osg::ref_ptr<osg::Node> _node;
+            osg::ref_ptr<osgUtil::StateToCompile> _state;
+        };
+
+        void* _token;
+        class PagingManager* _pagingManager;
+        osg::ref_ptr<SceneGraphCallbacks> _callbacks;
+        RefinePolicy _refinePolicy;
+        std::atomic_bool _loadTriggered;
+        std::atomic_bool _compileTriggered;
+        std::atomic_bool _mergeTriggered;
+        bool _merged;
+        Future<Loaded> _loaded;
+        Future<osg::ref_ptr<osg::Node>> _compiled;
+        Mutex _mutex;
+        optional<osg::BoundingSphere> _userBS;
+        float _minRange;
+        float _maxRange;
+        float _minPixels;
+        float _maxPixels;
+        bool _useRange;
+        float _priorityScale;
+        Job _job;
+        bool _preCompile;
+        std::function<osg::ref_ptr<osg::Node>(Cancelable*)> _load;
+        std::atomic_int _revision;
+        bool _autoUnload;
+
+        bool merge(int revision);
+    };
+
+    /**
+     * Group node class that performs memory management
+     * functions for a graph of PagedNodes. This object
+     * should be an ancestor of any PagedNode objects that
+     * it is going to manage.
+     */
+    class OSGEARTH_EXPORT PagingManager : public osg::Group
+    {
+    public:
+
+        PagingManager();
+
+        inline void* use(PagedNode2* node, void* token) {
+            ScopedMutexLock lock(_trackerMutex);
+            return _tracker.use(node, token);
+        }
+
+        //! Manually call an update on the PagingManager.  This should only be used if you are loading data outside of a traditional frameloop and want to merge data.
+        void update();
+
+    protected:
+        virtual ~PagingManager() { }
+
+    public:
+        void traverse(osg::NodeVisitor& nv);
+
+    private:
+        Mutex _trackerMutex;
+        SentryTracker<osg::ref_ptr<PagedNode2>> _tracker;
+        std::list<PagedNode2*> _trash;
+        using UpdateFunc = std::function<void(Cancelable*)>;
+        UpdateFunc _updateFunc;
+
+        mutable Mutex _mergeMutex;
+        struct ToMerge {
+            osg::observer_ptr<PagedNode2> _node;
+            int _revision;
+        };
+        std::queue<ToMerge> _mergeQueue;
+        unsigned _mergesPerFrame;
+        std::atomic_bool _newFrame;
+
+        inline void merge(PagedNode2* host) {
+            ScopedMutexLock lock(_mergeMutex);
+            ToMerge toMerge;
+            toMerge._node = host;
+            toMerge._revision = host->_revision;
+            _mergeQueue.push(std::move(toMerge));
+        }
+
+        friend class PagedNode2;
+    };
+
 } }
 
 #endif // OSGEARTHUTIL_PAGEDNODE_H

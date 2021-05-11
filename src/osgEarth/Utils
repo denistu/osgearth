@@ -24,6 +24,7 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/StringUtils>
+#include <osgEarth/Threading>
 
 #include <osg/Vec3f>
 #include <osg/AutoTransform>
@@ -35,49 +36,115 @@
 #include <string>
 #include <list>
 #include <map>
-
-namespace osg
-{
-    class EllipsoidModel;
-}
+#include <typeinfo>
 
 namespace osgEarth { namespace Util
-{    
+{
+    using namespace osgEarth::Threading;
+
     /**
      * Utility for storing observables in an osg::Object
      */
-    template<typename T>
-    class OptionsData : public osg::Object {
+    class ObjectStorage
+    {
+    private:
+        template<typename T>
+        class Data : public osg::Object {
+        public:
+            META_Object(osgEarth, Data);
+            Data(const std::string& name, T* obj) : _obj(obj) { setName(name); }
+            Data(const std::string& name, std::shared_ptr<T> obj) : _shared_obj(obj) { setName(name); }
+            Data() { }
+            Data(const Data& rhs, const osg::CopyOp& copy) : osg::Object(rhs, copy), _obj(rhs._obj) { }
+            osg::observer_ptr<T> _obj;
+            std::shared_ptr<T> _shared_obj;
+        };
+
     public:
-        static void set(osg::Object* o, const std::string& name, T* obj) {            
+        template<typename T>
+        static void set(osg::Object* o, const std::string& name, T* obj) {
+            if (o == nullptr || obj == nullptr) return;
             osg::UserDataContainer* udc = o->getOrCreateUserDataContainer();
             unsigned i = udc->getUserObjectIndex(name);
-            if (i == udc->getNumUserObjects()) udc->removeUserObject(i);
-            udc->addUserObject(new OptionsData<T>(name, obj));
+            if (i < udc->getNumUserObjects()) udc->removeUserObject(i);
+            udc->addUserObject(new Data<T>(name, obj));
         }
-        static bool lock(const osg::Object* o, const std::string& name, osg::ref_ptr<T>& out) {
-            if (!o) return false;
-            const OptionsData<T>* data = dynamic_cast<const OptionsData<T>*>(osg::getUserObject(o, name));
+        template<typename T>
+        static bool get(const osg::Object* o, const std::string& name, osg::ref_ptr<T>& out) {
+            out = nullptr;
+            if (o == nullptr) return false;
+            const Data<T>* data = dynamic_cast<const Data<T>*>(osg::getUserObject(o, name));
             return data ? data->_obj.lock(out) : false;
         }
-        static osg::ref_ptr<T> get(const osg::Object* o, const std::string& name) {
-            osg::ref_ptr<T> result;
-            bool ok = lock(o, name, result);
-            return result;
+        template<typename T>
+        static void set(osg::Object* o, T* obj) {
+            if (o == nullptr || obj == nullptr) return;
+            const char* name = typeid(T).name();
+            osg::UserDataContainer* udc = o->getOrCreateUserDataContainer();
+            unsigned i = udc->getUserObjectIndex(name);
+            if (i < udc->getNumUserObjects()) udc->removeUserObject(i);
+            udc->addUserObject(new Data<T>(name, obj));
         }
-    public:
-        META_Object(osgEarth,OptionsData);
-        OptionsData(const std::string& name, T* obj) : _obj(obj) { setName(name); }
-        OptionsData() { }
-        OptionsData(const OptionsData& rhs, const osg::CopyOp& copy) : osg::Object(rhs, copy), _obj(rhs._obj) { }
-    private:
-        osg::observer_ptr<T> _obj;
+        template<typename T>
+        static bool get(const osg::Object* o, osg::ref_ptr<T>& out) {
+            out = nullptr;
+            if (o == nullptr) return false;
+            const char* name = typeid(T).name();
+            const Data<T>* data = dynamic_cast<const Data<T>*>(osg::getUserObject(o, name));
+            return data ? data->_obj.lock(out) : false;
+        }
+        template<typename T>
+        static void set(osg::Object* o, std::shared_ptr<T> obj) {
+            if (o == nullptr || obj == nullptr) return;
+            const char* name = typeid(T).name();
+            osg::UserDataContainer* udc = o->getOrCreateUserDataContainer();
+            unsigned i = udc->getUserObjectIndex(name);
+            if (i < udc->getNumUserObjects()) udc->removeUserObject(i);
+            udc->addUserObject(new Data<T>(name, obj));
+        }
+        template<typename T>
+        static bool get(const osg::Object* o, std::shared_ptr<T>& out) {
+            out = nullptr;
+            const char* name = typeid(T).name();
+            if (!o) return false;
+            const Data<T>* data = dynamic_cast<const Data<T>*>(osg::getUserObject(o, name));
+            out = data->_shared_obj;
+            return data->_shared_obj != nullptr;
+        }
+
+        template<typename T>
+        struct Install : public osg::NodeCallback
+        {
+            osg::ref_ptr<T> _data;
+
+            Install(T* data) : _data(data) { }
+
+            void operator()(osg::Node* node, osg::NodeVisitor* nv)
+            {
+                ObjectStorage::set(nv, _data.get());
+                traverse(node, nv);
+            }
+        };
+
+        template<typename T>
+        struct SetValue : public osg::NodeCallback
+        {
+            std::string _key;
+            T _value;
+
+            SetValue(const std::string& key, const T& value) : _key(key), _value(value) { }
+            void operator()(osg::Node* node, osg::NodeVisitor* nv)
+            {
+                nv->setUserValue(_key, _value);
+                traverse(node, nv);
+            }
+        };
     };
 
     struct Utils
     {
         /**
-         * Clamps v to [vmin..vmax], then remaps its range to [r0..r1]. 
+         * Clamps v to [vmin..vmax], then remaps its range to [r0..r1].
          */
         static double remap( double v, double vmin, double vmax, double r0, double r1 )
         {
@@ -138,7 +205,7 @@ namespace osgEarth { namespace Util
 
     /**
      * Scans geometry and validates that it's set up properly.
-     */    
+     */
     struct OSGEARTH_EXPORT GeometryValidator : public osg::NodeVisitor
     {
         GeometryValidator();
@@ -155,6 +222,142 @@ namespace osgEarth { namespace Util
         AllocateAndMergeBufferObjectsVisitor();
         virtual ~AllocateAndMergeBufferObjectsVisitor() { }
         void apply(osg::Drawable& drawable);
+    };
+
+
+    /**
+     * Tracks usage data by maintaining a sentry-blocked linked list.
+     * Each time a use called "use" the corresponding record moves to
+     * the right of the sentry marker. After a cycle you can call
+     * collectTrash to process all users that did not call use() in the
+     * that cycle, and dispose of them.
+     */
+    template<typename T>
+    class SentryTracker
+    {
+    public:
+        struct ListEntry
+        {
+            ListEntry(T data, void* token) : _data(data), _token(token) { }
+            T _data;
+            void* _token;
+        };
+
+        using List = std::list<ListEntry>;
+        using ListIterator = typename List::iterator;
+
+        struct Token
+        {
+            ListIterator _listptr;
+            T _data;
+        };
+
+        SentryTracker()
+        {
+            _list.emplace_front(nullptr, nullptr); // the sentry marker
+            _sentryptr = _list.begin();
+        }
+
+        List _list;
+        ListIterator _sentryptr;
+
+        inline void* use(const T& data, void* token)
+        {
+            // Find the tracker for this tile and update its timestamp
+            if (token)
+            {
+                Token& te = *static_cast<Token*>(token);
+
+                // Move the tracker to the front of the list (ahead of the sentry).
+                // Once a cull traversal is complete, all visited tiles will be
+                // in front of the sentry, leaving all non-visited tiles behind it.
+                _list.splice(_list.begin(), _list, te._listptr);
+                te._listptr = _list.begin();
+                return token;
+            }
+            else
+            {
+                // New entry:
+                Token* te = new Token();
+                _list.emplace_front(data, te); // ListEntry
+                te->_data = data;
+                te->_listptr = _list.begin();
+                return te;
+            }
+        }
+
+        inline void flush(
+            float fartherThanRange,
+            unsigned maxCount,
+            std::function<bool(T& obj)> dispose)
+        {
+            // After cull, all visited tiles are in front of the sentry, and all
+            // non-visited tiles are behind it. Start at the sentry position and
+            // iterate over the non-visited tiles, checking them for deletion.
+            ListIterator i = _sentryptr;
+            ListIterator tmp;
+            unsigned count = 0;
+
+            for (++i; i != _list.end() && count < maxCount; ++i)
+            {
+                ListEntry& le = *i;
+
+                bool disposed = true;
+
+                // user disposal function
+                if (dispose != nullptr)
+                    disposed = dispose(le._data);
+
+                if (disposed)
+                {
+                    // back up the iterator so we can safely erase the entry:
+                    tmp = i;
+                    --i;
+
+                    // delete the token
+                    delete static_cast<Token*>(le._token);
+
+                    // remove it from the tracker list:
+                    _list.erase(tmp);
+                }
+
+                ++count;
+            }
+
+            // reset the sentry.
+            _list.splice(_list.begin(), _list, _sentryptr);
+            _sentryptr = _list.begin();
+        }
+    };
+
+
+    /** @deprecated - please use ObjectStorage instead */
+    template<typename T>
+    class OptionsData : public osg::Object {
+    public:
+        static void set(osg::Object* o, const std::string& name, T* obj) {
+            osg::UserDataContainer* udc = o->getOrCreateUserDataContainer();
+            unsigned i = udc->getUserObjectIndex(name);
+            if (i == udc->getNumUserObjects()) udc->removeUserObject(i);
+            udc->addUserObject(new OptionsData<T>(name, obj));
+        }
+        static bool lock(const osg::Object* o, const std::string& name, osg::ref_ptr<T>& out) {
+            if (!o) return false;
+            const OptionsData<T>* data = dynamic_cast<const OptionsData<T>*>(osg::getUserObject(o, name));
+            return data ? data->_obj.lock(out) : false;
+        }
+        static osg::ref_ptr<T> get(const osg::Object* o, const std::string& name) {
+            osg::ref_ptr<T> result;
+            bool ok = lock(o, name, result);
+            return result;
+        }
+    public:
+        META_Object(osgEarth, OptionsData);
+        OptionsData(const std::string& name, T* obj) : _obj(obj) { setName(name); }
+        OptionsData() { }
+        OptionsData(const OptionsData& rhs, const osg::CopyOp& copy) : osg::Object(rhs, copy), _obj(rhs._obj) { }
+    private:
+        osg::observer_ptr<T> _obj;
     };
 
 } }

@@ -29,7 +29,7 @@ SET(OSGEARTH_MINOR_VERSION 1)
 SET(OSGEARTH_PATCH_VERSION 0)
 
 # Increment this each time the ABI changes
-SET(OSGEARTH_SOVERSION 101)
+SET(OSGEARTH_SOVERSION 109)
 
 # C++11 is required for osgEarth 3.x
 set_property(GLOBAL PROPERTY CXX_STANDARD 11)
@@ -121,7 +121,7 @@ option(OSGEARTH_ENABLE_GEOCODER "Enable the geocoder (GDAL/OGR must be built wit
 
 # Mobile/GLES:
 IF (OSGEARTH_USE_GLES)
-    find_package(OpenGLES) 
+    find_package(OpenGLES)
 ELSE ()
     find_package(OpenGL)
 ENDIF (OSGEARTH_USE_GLES)
@@ -139,6 +139,7 @@ find_package(BASISU)
 find_package(GLEW)
 find_package(Protobuf)
 find_package(WEBP)
+find_package(Blend2D)
 
 if(OSGEARTH_ENABLE_PROFILING)
     find_package(Tracy)
@@ -176,6 +177,15 @@ IF(TRACY_FOUND AND OSGEARTH_ENABLE_PROFILING)
     ADD_DEFINITIONS(-DOSGEARTH_PROFILING)
 ENDIF()
 
+if(GLEW_FOUND)
+    set(OSGEARTH_ENABLE_IMGUI 1)
+    add_definitions(-DOSGEARTH_ENABLE_IMGUI)
+endif()
+
+if(OSGEARTH_ENABLE_GEOCODER)
+    add_definitions(-DOSGEARTH_HAVE_GEOCODER)
+endif()
+
 # Protobuf enables the MVT (Mapnik Vector Tiles) format
 SET (PROTOBUF_USE_DLLS FALSE CACHE BOOL "Set this to true if Protobuf is compiled as dll")
 
@@ -186,7 +196,7 @@ IF (WITH_EXTERNAL_DUKTAPE)
 ENDIF (WITH_EXTERNAL_DUKTAPE)
 
 # Whether to install shaders (glsl files).
-# If true, shaders install into a resources folder. If false, they are inlined in the 
+# If true, shaders install into a resources folder. If false, they are inlined in the
 # code and you cannot tweak them after install.
 OPTION(OSGEARTH_INSTALL_SHADERS "Whether to deploy GLSL shaders when doing a Make INSTALL" OFF)
 
@@ -276,4 +286,4 @@ ADD_SUBDIRECTORY(src)
 
 if (OSGEARTH_BUILD_DOCS)
     ADD_SUBDIRECTORY(docs)
-endif()    
+endif()

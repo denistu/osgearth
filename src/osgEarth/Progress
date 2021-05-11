@@ -21,8 +21,8 @@
 #define OSGEARTH_PROGRESS_H 1
 
 #include <osgEarth/Common>
-#include <osgEarth/Containers>
 #include <osgEarth/Threading>
+#include <osg/observer_ptr>
 
 namespace osgEarth
 {
@@ -30,14 +30,16 @@ namespace osgEarth
     * ProgressCallback is a general purpose interface for functions that need to report progress
     * or handle cancelation of a task.
     */
-    class OSGEARTH_EXPORT ProgressCallback : public osg::Referenced, public Threading::Cancelable
+    class OSGEARTH_EXPORT ProgressCallback : 
+        public osg::Referenced, 
+        public Threading::Cancelable
     {
     public:
-        /**
-        * Creates a new ProgressCallback
-        */
+        //! Creates a new ProgressCallback
         ProgressCallback();
-        virtual ~ProgressCallback() { }
+
+        //! Createa a new ProgressCallback that proxies an existing Cancelable
+        ProgressCallback(Cancelable* c);
 
         /**
          * Report an error and set the canceled flag to true.
@@ -112,50 +114,15 @@ namespace osgEarth
         float getRetryDelay() const { return _retryDelay_s; }
 
     protected:
-        std::string       _message;
-        mutable  bool     _canceled;
-        mutable  float    _retryDelay_s;
+        virtual ~ProgressCallback() { }
+
+        Cancelable* _cancelable;
+        std::string _message;
+        mutable bool _canceled;
+        mutable float _retryDelay_s;
 
         //! Override this to tell the Progress to cancel.
         virtual bool shouldCancel() const { return false; }
-    };
-
-
-    /**
-    * ConsoleProgressCallback is a simple ProgressCallback that reports progress to the console
-    */
-    class OSGEARTH_EXPORT ConsoleProgressCallback : public ProgressCallback
-    {
-    public:
-        /**
-        * Creates a new ConsoleProgressCallback
-        */
-        ConsoleProgressCallback();
-        virtual ~ConsoleProgressCallback() { }
-
-        virtual void reportError(const std::string& msg);
-
-        /**
-        * Callback function that will be called.
-        * @param current
-        *        The amount of work done in the current stage
-        * @param total
-        *        The total amount of work to be done in the current stage
-        * @param stage
-        *        Stage of the operation we're currently in
-        * @param totalStages
-        *        Total number of stages in the operation
-        * @param msg
-        *        Description of what is being done. Useful when total is unknown.
-        * @param returns
-        *        Returns true if the current task should be cancelled, false otherwise.
-        */
-        virtual bool reportProgress(
-            double             current, 
-            double             total, 
-            unsigned           currentStage,
-            unsigned           totalStages,
-            const std::string& msg );
     };
 
     /**
@@ -170,8 +137,29 @@ namespace osgEarth
 
         DatabasePagerProgressCallback();
 
-        virtual bool shouldCancel() const;
+    protected:
+        virtual bool shouldCancel() const override;
     };
+
+    /**
+     * Progress callback that will invoke cancelation if
+     * a referenced object gets destructed.
+     */
+    class OSGEARTH_EXPORT ObserverProgressCallback : public ProgressCallback
+    {
+    public:
+        ObserverProgressCallback(osg::Referenced* host) :
+            _host(host) { }
+
+    protected:
+        bool shouldCancel() const override {
+            return _host.valid() == false;
+        }
+
+    private:
+        osg::observer_ptr<osg::Referenced> _host;
+    };
+
 }
 
 #endif

@@ -23,8 +23,9 @@
 #include <osgEarth/Filter>
 #include <osgEarth/MVT>
 #include <osgEarth/Registry>
+#include <osgEarth/Metrics>
 
-#define LC "[XYZFeatureSource] "
+#define LC "[XYZFeatureSource] " << getName() << " : "
 
 using namespace osgEarth;
 #define OGR_SCOPED_LOCK GDAL_SCOPED_LOCK
@@ -121,6 +122,8 @@ XYZFeatureSource::init()
 FeatureCursor*
 XYZFeatureSource::createFeatureCursorImplementation(const Query& query, ProgressCallback* progress)
 {
+    OE_PROFILING_ZONE;
+
     FeatureCursor* result = 0L;
 
     URI uri = createURL(query);
@@ -221,7 +224,7 @@ XYZFeatureSource::getFeatures(const std::string& buffer, const TileKey& key, con
         // fail if we can't find an appropriate OGR driver:
         if (!ogrDriver)
         {
-            OE_WARN << LC << "Error reading TFS response; cannot grok content-type \"" << mimeType << "\""
+            OE_WARN << LC << "Error reading response; cannot grok content-type \"" << mimeType << "\""
                 << std::endl;
             return false;
         }
@@ -230,7 +233,7 @@ XYZFeatureSource::getFeatures(const std::string& buffer, const TileKey& key, con
 
         if (!ds)
         {
-            OE_WARN << LC << "Error reading TFS response" << std::endl;
+            OE_WARN << LC << "Error reading response" << std::endl;
             return false;
         }
 
@@ -314,7 +317,7 @@ XYZFeatureSource::isJSON(const std::string& mime) const
 URI
 XYZFeatureSource::createURL(const Query& query)
 {
-    if (query.tileKey().isSet())
+    if (query.tileKey().isSet() && query.tileKey()->valid())
     {
         const TileKey &key = query.tileKey().get();
         unsigned int tileX = key.getTileX();

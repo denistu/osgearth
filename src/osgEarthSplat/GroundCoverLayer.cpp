@@ -30,6 +30,7 @@
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
 #include <osgEarth/Math>
+#include <osgEarth/TerrainEngineNode>
 #include <osg/BlendFunc>
 #include <osg/Multisample>
 #include <osg/Texture2D>
@@ -245,6 +246,7 @@ GroundCoverLayer::init()
 
     _debug = (::getenv("OSGEARTH_GROUNDCOVER_DEBUG") != NULL);
 
+    _frameLastUpdate = 0U;
 }
 
 GroundCoverLayer::~GroundCoverLayer()
@@ -383,6 +385,21 @@ GroundCoverLayer::getUseAlphaToCoverage() const
 }
 
 void
+GroundCoverLayer::update(osg::NodeVisitor& nv)
+{
+    int frame = nv.getFrameStamp()->getFrameNumber();
+
+    if (frame > _frameLastUpdate &&
+        _renderer.valid() && 
+        _renderer->_frameLastActive > 0u &&
+        (frame - _renderer->_frameLastActive) > 2)
+    {
+        releaseGLObjects(nullptr);
+        _renderer->_frameLastActive = 0u;
+    }
+}
+
+void
 GroundCoverLayer::addedToMap(const Map* map)
 {
     PatchLayer::addedToMap(map);
@@ -436,10 +453,11 @@ GroundCoverLayer::removedFromMap(const Map* map)
 }
 
 void
-GroundCoverLayer::setTerrainResources(TerrainResources* res)
+GroundCoverLayer::prepareForRendering(TerrainEngine* engine)
 {
-    PatchLayer::setTerrainResources(res);
+    PatchLayer::prepareForRendering(engine);
 
+    TerrainResources* res = engine->getResources();
     if (res)
     {
         if (_groundCoverTexBinding.valid() == false)
@@ -622,16 +640,15 @@ GroundCoverLayer::releaseGLObjects(osg::State* state) const
 
     PatchLayer::releaseGLObjects(state);
 
-    if (isOpen())
+    if (isOpen() &&
+        _atlas.valid() &&
+        _atlas->getUnRefImageDataAfterApply() == false)
     {
-        if (_atlas.valid())
-        {
-            // Workaround for
-            // https://github.com/openscenegraph/OpenSceneGraph/issues/1013
-            for (unsigned i = 0; i < _atlas->getNumImages(); ++i)
-                if (_atlas->getImage(i))
-                    _atlas->getImage(i)->dirty();
-        }
+        // Workaround for
+        // https://github.com/openscenegraph/OpenSceneGraph/issues/1013
+        for (unsigned i = 0; i < _atlas->getNumImages(); ++i)
+            if (_atlas->getImage(i))
+                _atlas->getImage(i)->dirty();
     }
 }
 
@@ -701,6 +718,7 @@ namespace
         return geom;
     }
 
+#if 0
     osg::Geometry* loadShape()
     {
         //osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile("D:/data/models/rockinsoil/RockSoil.3DS.osg");
@@ -712,6 +730,7 @@ namespace
         
         return cruncher._geom.release();
     }
+#endif
 }
 
 osg::Geometry*
@@ -721,9 +740,9 @@ GroundCoverLayer::createGeometry() const
 
     if (_isModel)
     {
-        out_geom = loadShape();
-        out_geom->setUseVertexBufferObjects(true);
-        out_geom->setUseDisplayList(false);
+        //out_geom = loadShape();
+        //out_geom->setUseVertexBufferObjects(true);
+        //out_geom->setUseDisplayList(false);
         return out_geom;
     }
     else
@@ -778,11 +797,15 @@ GroundCoverLayer::Renderer::Renderer(GroundCoverLayer* layer)
     _computeStateSet->setAttribute(_computeProgram, osg::StateAttribute::ON);
 
     _counter = 0;
+
+    _frameLastActive = ~0U;
 }
 
 void
 GroundCoverLayer::Renderer::draw(osg::RenderInfo& ri, const PatchLayer::TileBatch* tiles)
 {
+    _frameLastActive = ri.getState()->getFrameStamp()->getFrameNumber();
+
     DrawState& ds = _drawStateBuffer[ri.getContextID()];
     ds._renderer = this;
     osg::State* state = ri.getState();
@@ -794,10 +817,10 @@ GroundCoverLayer::Renderer::draw(osg::RenderInfo& ri, const PatchLayer::TileBatc
 
     // Push the pre-gen culling shader and run it:
     const ZoneSA* sa = ZoneSA::extract(ri.getState());
-    osg::ref_ptr<InstanceCloud>& instancer = ds._instancers[sa->_obj];
+    osg::ref_ptr<LegacyInstanceCloud>& instancer = ds._instancers[sa->_obj];
     if (!instancer.valid())
     {
-        instancer = new InstanceCloud();
+        instancer = new LegacyInstanceCloud();
         ds._lastTileBatchID = -1;
         ds._uniforms.clear();
     }
@@ -890,7 +913,7 @@ GroundCoverLayer::Renderer::applyLocalState(osg::RenderInfo& ri, DrawState& ds)
 
     // Check for initialization in this zone:
     const BiomeZone* bz = ZoneSA::extract(ri.getState())->_obj;
-    osg::ref_ptr<InstanceCloud>& instancer = ds._instancers[bz];
+    osg::ref_ptr<LegacyInstanceCloud>& instancer = ds._instancers[bz];
 
     if (!instancer->getGeometry() || u._numInstances1D == 0)
     {
@@ -938,7 +961,7 @@ GroundCoverLayer::Renderer::drawTile(osg::RenderInfo& ri, const PatchLayer::Draw
 {
     const ZoneSA* sa = ZoneSA::extract(ri.getState());
     DrawState& ds = _drawStateBuffer[ri.getContextID()];
-    osg::ref_ptr<InstanceCloud>& instancer = ds._instancers[sa->_obj];
+    osg::ref_ptr<LegacyInstanceCloud>& instancer = ds._instancers[sa->_obj];
     const osg::Program::PerContextProgram* pcp = ri.getState()->getLastAppliedProgramObject();
     if (!pcp)
     {
@@ -995,7 +1018,7 @@ GroundCoverLayer::Renderer::releaseGLObjects(osg::State* state) const
 
         for (const auto& i : ds._instancers)
         {
-            InstanceCloud* cloud = i.second.get();
+            LegacyInstanceCloud* cloud = i.second.get();
             if (cloud)
             {
                 cloud->releaseGLObjects(state);
@@ -1013,7 +1036,7 @@ GroundCoverLayer::Renderer::releaseGLObjects(osg::State* state) const
 
             for (const auto& i : ds._instancers)
             {
-                InstanceCloud* cloud = i.second.get();
+                LegacyInstanceCloud* cloud = i.second.get();
                 if (cloud)
                 {
                     cloud->releaseGLObjects(state);

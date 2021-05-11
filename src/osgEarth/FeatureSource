@@ -42,6 +42,7 @@ namespace osgEarth
             OE_OPTION(GeoInterpolation, geoInterp);
             OE_OPTION(std::string, fidAttribute);
             OE_OPTION(bool, rewindPolygons);
+            OE_OPTION(std::string, vdatum);
             OE_OPTION_VECTOR(ConfigOptions, filters);
             virtual Config getConfig() const;
         private:
@@ -97,11 +98,24 @@ namespace osgEarth
 
         /**
         * Creates a cursor that iterates over all features corresponding to the
+        * specified TileKey, passing them through the specified filter chain.
+        * Caller takes ownership of the returned object.
+        */
+        FeatureCursor* createFeatureCursor(
+            const TileKey& key,
+            FeatureFilterChain* filters,
+            FilterContext* context,
+            ProgressCallback* progress);
+
+        /**
+        * Creates a cursor that iterates over all features corresponding to the
         * specified TileKey with a buffer. Caller takes ownership of the returned object.
         */
         FeatureCursor* createFeatureCursor(
             const TileKey& key,
             const Distance& buffer,
+            FeatureFilterChain* filters,
+            FilterContext* context,
             ProgressCallback* progress);
 
         /**
@@ -113,12 +127,30 @@ namespace osgEarth
             ProgressCallback* progress);
 
         /**
+        * Creates a cursor that iterates over all features corresponding to the
+        * specified TileKey, passing them through the specified filter chain.
+        * Caller takes ownership of the returned object.
+        */
+        FeatureCursor* createFeatureCursor(
+            const Query& query,
+            FeatureFilterChain* filters,
+            FilterContext* context,
+            ProgressCallback* progress);
+
+        /**
          * Creates a cursor that iterates over all the features corresponding to the
          * specified query. Caller takes ownership of the returned object.
          */
         FeatureCursor* createFeatureCursor(ProgressCallback* progress) {
             return createFeatureCursor(Query(), progress);
         }
+
+        //! Gets a vector of keys required to cover the input key and
+        //! a buffering distance.
+        unsigned getKeys(
+            const TileKey& key,
+            const Distance& buffer,
+            std::unordered_set<TileKey>& output) const;
 
         /**
          * Gets a reference to the metadata that describes features that you can
@@ -131,7 +163,7 @@ namespace osgEarth
          * Sets the feature profile for this source.
          * This is required. Usually the subclass should call this from open().
          */
-        void setFeatureProfile(const FeatureProfile* profile);
+        const FeatureProfile* setFeatureProfile(const FeatureProfile* profile);
 
         /**
          * Whether this FeatureSource supports inserting and deleting features
@@ -183,14 +215,14 @@ namespace osgEarth
          *      The Geometry type of the FeatureSource
          */
         virtual Geometry::Type getGeometryType() const { return Geometry::TYPE_UNKNOWN; }
-        
+
         /**
          *Returns true if this source creates features with embedded style information.
          * By default, this is false (features are not expected to carry their own
          * style definitions).
          */
         virtual bool hasEmbeddedStyles() const { return false; }
-        
+
         /**
          * Accesses the list of feature filters that will transform features
          * before they are returned in a feature cursor.
@@ -211,15 +243,15 @@ namespace osgEarth
          * Clears the blacklist.
          */
         void clearBlacklist();
-        
+
         /**
          * Checks the blacklist for a feature ID.
          */
-        bool isBlacklisted( FeatureID fid ) const; 
+        bool isBlacklisted( FeatureID fid ) const;
 
         //! Build (or rebuild) a disk-based spatial index.
         virtual void buildSpatialIndex() { }
-        
+
         //! dirty (??)
         virtual void dirty() { }
 
@@ -235,6 +267,10 @@ namespace osgEarth
         std::unordered_set<FeatureID>      _blacklist;
         unsigned                           _blacklistSize;
         osg::ref_ptr<FeatureFilterChain>   _filters;
+
+        typedef LRUCache<TileKey, FeatureList> FeaturesLRU;
+        std::unique_ptr< FeaturesLRU > _featuresCache;
+        Threading::Mutex _featuresCacheMutex;
 
         //! Implements the feature cursor creation
         virtual FeatureCursor* createFeatureCursorImplementation(

@@ -22,6 +22,7 @@
 #include <osgEarth/SceneGraphCallback>
 #include <osgEarth/ShaderLoader>
 #include <osgEarth/TileKey>
+#include <osgEarth/TerrainEngineNode>
 #include <osgEarth/TerrainResources>
 #include <osg/StateSet>
 
@@ -200,14 +201,44 @@ Layer::getCacheID() const
         Config hashConf = options().getConfig();
 
         // remove non-data properties.
+        // TODO: move these a virtual function called
+        // getNonDataProperties() or something.
         hashConf.remove("name");
         hashConf.remove("enabled");
+        hashConf.remove("visible");
         hashConf.remove("cacheid");
+        hashConf.remove("cache_id");
         hashConf.remove("cache_only");
         hashConf.remove("cache_enabled");
         hashConf.remove("cache_policy");
-        hashConf.remove("visible");
         hashConf.remove("l2_cache_size");
+        hashConf.remove("attribution");
+        hashConf.remove("shader");
+        hashConf.remove("shaders");
+        hashConf.remove("shader_define");
+        hashConf.remove("terrain");
+        hashConf.remove("proxy");
+        hashConf.remove("min_level");
+        hashConf.remove("max_level");
+        hashConf.remove("max_data_level");
+        hashConf.remove("min_range");
+        hashConf.remove("max_range");
+        hashConf.remove("attenuation_range");
+        hashConf.remove("blend");
+        hashConf.remove("shared");
+        hashConf.remove("accept_draping");
+        hashConf.remove("altitude");
+        hashConf.remove("async");
+        hashConf.remove("shared_sampler");
+        hashConf.remove("shared_matrix");
+        hashConf.remove("min_filter");
+        hashConf.remove("max_filter");
+        hashConf.remove("texture_compression");
+        hashConf.remove("color_filters");
+        hashConf.remove("open_write");
+        hashConf.remove("geo_interpolation");
+        hashConf.remove("fid_attribute");
+        hashConf.remove("rewind_polygons");
 
         unsigned hash = osgEarth::hashString(hashConf.toJSON());
         std::stringstream buf;
@@ -293,7 +324,7 @@ Layer::init()
     _mutex = new Threading::Mutex(options().name().isSet() ? options().name().get() : "Unnamed Layer(OE)");
 }
 
-const Status&
+Status
 Layer::open()
 {
     // Cannot open a layer that's already open OR is disabled.
@@ -328,7 +359,7 @@ Layer::open()
     return getStatus();
 }
 
-const Status&
+Status
 Layer::open(const osgDB::Options* readOptions)
 {
     setReadOptions(readOptions);
@@ -411,16 +442,24 @@ Layer::getStatus() const
 }
 
 void
-Layer::setTerrainResources(TerrainResources* res)
+Layer::invoke_prepareForRendering(TerrainEngine* engine)
+{
+    prepareForRendering(engine);
+
+    // deprecation path; call this in case some older layer is still
+    // implementing it.
+    setTerrainResources(engine->getResources());
+}
+
+void
+Layer::prepareForRendering(TerrainEngine* engine)
 {
     // Install an earth-file shader if necessary (once)
-    for(std::vector<ShaderOptions>::const_iterator i = options().shaders().begin();
-        i != options().shaders().end();
-        ++i)
+    for (const auto& shaderOptions : options().shaders())
     {
-        LayerShader* shader = new LayerShader(*i);
-        shader->install(this, res);
-        _shaders.push_back(shader);
+        LayerShader* shader = new LayerShader(shaderOptions);
+        shader->install(this, engine->getResources());
+        _shaders.emplace_back(shader);
     }
 }
 

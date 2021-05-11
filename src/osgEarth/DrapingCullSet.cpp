@@ -53,18 +53,35 @@ DrapingCullSet::DrapingCullSet()
     // nop
 }
 
+const osg::BoundingSphere&
+DrapingCullSet::getBound() const
+{
+    if (_data.empty())
+    {
+        static osg::BoundingSphere s_empty;
+        return s_empty;
+    }
+    else
+    {
+        return _data.rbegin()->second._bs;
+    }
+}
+
 void
 DrapingCullSet::push(DrapeableNode* node, const osg::NodePath& path, const osg::FrameStamp* fs)
 {
-    _entries.push_back( Entry() );
-    Entry& entry = _entries.back();
+    FrameData& data = _data[fs->getFrameNumber()];
+
+    Entry entry;
     entry._node = node;
-    entry._path.setNodePath( path );
-    entry._matrix = new osg::RefMatrix( osg::computeLocalToWorld(path) );
-    entry._frame = fs ? fs->getFrameNumber() : 0;
-    _bs.expandBy( osg::BoundingSphere(
+    entry._path.setNodePath(path);
+    entry._matrix = new osg::RefMatrix(osg::computeLocalToWorld(path));
+
+    data._entries.emplace_back(std::move(entry));
+
+    data._bs.expandBy(osg::BoundingSphere(
         node->getBound().center() * (*entry._matrix.get()),
-        node->getBound().radius() ));
+        node->getBound().radius()));
 }
 
 void
@@ -72,36 +89,46 @@ DrapingCullSet::accept(osg::NodeVisitor& nv)
 {
     if ( nv.getVisitorType() == nv.CULL_VISITOR )
     {
+        if (nv.getFrameStamp() == nullptr)
+            return;
+
+        if (_data.empty())
+            return;
+
         osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>( &nv );
 
         // We will use the visitor's path to prevent doubely-applying the statesets
         // of common ancestors
         const osg::NodePath& nvPath = nv.getNodePath();
 
-        int frame = nv.getFrameStamp() ? nv.getFrameStamp()->getFrameNumber() : 0u;
+        FrameData& data = _data.rbegin()->second;
 
-        for( std::vector<Entry>::iterator entry = _entries.begin(); entry != _entries.end(); ++entry )
+        for(auto& entry : data._entries)
         {
-            if ( frame - entry->_frame > 1 )
+            osg::ref_ptr<DrapeableNode> drapeable;
+            if (entry._node.lock(drapeable) == false)
+                continue;
+
+            if (drapeable->getDrapingEnabled() == false)
                 continue;
 
             // If there's an active (non-identity matrix), apply it
-            if ( entry->_matrix.valid() )
+            if ( entry._matrix.valid() )
             {
-                osg::ref_ptr<osg::RefMatrix> m = osg::clone(entry->_matrix.get());
+                osg::ref_ptr<osg::RefMatrix> m = osg::clone(entry._matrix.get());
                 m->postMult( *cv->getModelViewMatrix() );
                 cv->pushModelViewMatrix( m.get(), osg::Transform::RELATIVE_RF );
             }
 
             // After pushing the matrix, we can perform the culling bounds test.
-            if ( !cv->isCulled( entry->_node->getBound() ) )
+            if ( !cv->isCulled(drapeable->getBound() ) )
             {
                 // Apply the statesets in the entry's node path, but skip over the ones that are
                 // shared with the current visitor's path since they are already in effect.
                 // Count them so we can pop them later.
                 int numStateSets = 0;
                 osg::RefNodePath nodePath;
-                if ( entry->_path.getRefNodePath(nodePath) )
+                if ( entry._path.getRefNodePath(nodePath) )
                 {
                     for(unsigned i=0; i<nodePath.size(); ++i)
                     {
@@ -121,9 +148,9 @@ DrapingCullSet::accept(osg::NodeVisitor& nv)
                 }
 
                 // Cull the DrapeableNode's children (but not the DrapeableNode itself!)
-                for(unsigned i=0; i<entry->_node->getNumChildren(); ++i)
+                for(unsigned i=0; i<entry._node->getNumChildren(); ++i)
                 {
-                    entry->_node->getChild(i)->accept( nv );
+                    drapeable->getChild(i)->accept( nv );
                 }
             
                 // pop the same number we pushed
@@ -134,15 +161,12 @@ DrapingCullSet::accept(osg::NodeVisitor& nv)
             }
 
             // pop the model view:
-            if ( entry->_matrix.valid() )
+            if ( entry._matrix.valid() )
             {
                 cv->popModelViewMatrix();
             }
         }
 
-        // since each DrapedCullSet is locked to a camera (and thus no
-        // threading issues) it should be OK to clear it out after accept is complete
-        _entries.clear();
-        _bs.init();
+        _data.erase(--_data.end());
     }
 }

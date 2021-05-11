@@ -28,6 +28,7 @@
 #include <osgEarth/FeatureSource>
 #include <osgEarth/FilterContext>
 #include <osgEarth/Geometry>
+#include <osgEarth/Metrics>
 
 #define LC "[Intersect FeatureFilter] "
 
@@ -68,13 +69,17 @@ public: // FeatureFilter
         if (!fs)
             return;
 
+        OE_PROFILING_ZONE;
+
         //TODO: should this be Profile::transformAndClampExtent instead?
-        GeoExtent localExtent = extent.transform( fs->getFeatureProfile()->getSRS() );
-        Query query;
-        query.bounds() = localExtent.bounds();
-        if (localExtent.intersects( fs->getFeatureProfile()->getExtent()))
+        GeoExtent extentInFeatureSRS = extent.transform( fs->getFeatureProfile()->getSRS() );
+
+        if (extentInFeatureSRS.intersects( fs->getFeatureProfile()->getExtent()))
         {
-            osg::ref_ptr< FeatureCursor > cursor = fs->createFeatureCursor( query, progress );
+            Query query;
+            query.bounds() = extentInFeatureSRS.bounds();
+
+            osg::ref_ptr<FeatureCursor> cursor = fs->createFeatureCursor( query, progress );
             if (cursor)
             {
                 cursor->fill( features );
@@ -82,49 +87,56 @@ public: // FeatureFilter
         }     
     }
 
+    //! Joins the boundaries attributes into the features by doing a
+    //! spatial intersection.
+    void combine(FeatureList& boundaries, FeatureList& input, FilterContext& context) const
+    {
+        OE_PROFILING_ZONE;
+
+        // Transform the boundaries into the coordinate system of the features
+        // for fast intersection testing
+        for (auto& boundary : boundaries)
+        {
+            boundary->transform(context.profile()->getSRS());
+        }
+
+        // For each feature, check for a spatial join:
+        for (auto& feature : input)
+        {
+            if (feature.valid() && feature->getGeometry())
+            {
+                for (const auto& boundary : boundaries)
+                {
+                    if (boundary->getGeometry()->intersects(feature->getGeometry()))
+                    {
+                        // Copy the attributes from the boundary to the feature (and overwrite)
+                        for (const auto& attr : boundary->getAttrs())
+                        {
+                            feature->set(attr.first, attr.second);
+                        }
+
+                        // upon success, don't check any more boundaries:
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+
     FilterContext push(FeatureList& input, FilterContext& context)
     {
+        OE_PROFILING_ZONE;
+
         if (featureSource().getLayer())
         {
             // Get any features that intersect this query.
             FeatureList boundaries;
-            getFeatures(context.extent().get(), boundaries, 0L); // TODO: progress...
+            getFeatures(context.extent().get(), boundaries, nullptr); // TODO: progress...
 
             if (!boundaries.empty())
             {
-                // Transform the boundaries into the coordinate system of the features
-                for (FeatureList::iterator itr = boundaries.begin(); itr != boundaries.end(); ++itr)
-                {
-                    itr->get()->transform( context.profile()->getSRS() );
-                }
-
-                for(FeatureList::const_iterator f = input.begin(); f != input.end(); ++f)
-                {
-                    Feature* feature = f->get();
-                    if ( feature && feature->getGeometry() )
-                    {
-                        osg::Vec2d c = feature->getGeometry()->getBounds().center2d();
-                       
-                        if (featureSource().getLayer()->getFeatureProfile()->getExtent().contains(GeoPoint(feature->getSRS(), c.x(), c.y())))
-                        {
-                            for (FeatureList::iterator itr = boundaries.begin(); itr != boundaries.end(); ++itr)
-                            {
-                                //if (ring && ring->contains2D(c.x(), c.y()))
-                                if (itr->get()->getGeometry()->intersects( feature->getGeometry() ) )
-                                {
-                                    // Copy the attributes in the boundary to the feature
-                                    for (AttributeTable::const_iterator attrItr = itr->get()->getAttrs().begin();
-                                         attrItr != itr->get()->getAttrs().end();
-                                         attrItr++)
-                                    {
-                                        feature->set( attrItr->first, attrItr->second );
-                                    }
-                                    break;
-                                }
-                            }                        
-                        }
-                    }
-                }
+                combine(boundaries, input, context);
             }
         }
 

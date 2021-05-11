@@ -56,7 +56,7 @@ CreateTileImplementation::createTile(
 
     // Verify that we have a map:
     osg::ref_ptr<const Map> map = context->getMap();
-    if(!map.valid())
+    if (!map.valid())
     {
         return nullptr;
     }
@@ -94,6 +94,9 @@ CreateTileImplementation::createTile(
     if (keys.empty())
         return 0L;
 
+    bool include_constrained = (flags & TerrainEngineNode::CREATE_TILE_INCLUDE_TILES_WITH_MASKS) != 0;
+    bool include_unconstrained = (flags & TerrainEngineNode::CREATE_TILE_INCLUDE_TILES_WITHOUT_MASKS) != 0;
+
     // group to hold all the tiles
     osg::ref_ptr<osg::Group> group;
 
@@ -105,6 +108,7 @@ CreateTileImplementation::createTile(
             *subkey,
             tileSize,
             map.get(),
+            context->options(),
             sharedGeom,
             progress);
 
@@ -113,8 +117,32 @@ CreateTileImplementation::createTile(
             return nullptr;
         }
 
-        if (sharedGeom.valid() && !sharedGeom->empty())
+        if (sharedGeom.valid() == false &&
+            include_constrained == true &&
+            include_unconstrained == false)
         {
+            // This means that we found a constrained tile that was completely 
+            // masked out - all triangles were removed. If we are ONLY returning
+            // constrained tiles, make an empty group for it to mark its
+            // existance.
+            if (!group.valid())
+                group = new osg::Group();
+
+            osg::Group* empty_tile_group = new osg::Group();
+            osg::UserDataContainer* udc = empty_tile_group->getOrCreateUserDataContainer();
+            udc->setUserValue("tile_key", subkey->str());
+            group->addChild(empty_tile_group);
+        }
+
+        else if (
+            sharedGeom.valid() &&
+            !sharedGeom->empty() &&
+            (
+                (include_constrained && sharedGeom->hasConstraints()) ||
+                (include_unconstrained && !sharedGeom->hasConstraints())
+            ))
+        {
+            // This means we got some geometry.
             if (!group.valid())
                 group = new osg::Group();
 
@@ -174,8 +202,7 @@ CreateTileImplementation::createTile(
             }
 
             // Establish a local reference frame for the tile:
-            GeoPoint centroid;
-            subkey->getExtent().getCentroid(centroid);
+            GeoPoint centroid = subkey->getExtent().getCentroid();
 
             osg::Matrix local2world;
             centroid.createLocalToWorld(local2world);

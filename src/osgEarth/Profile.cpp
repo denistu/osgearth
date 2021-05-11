@@ -157,6 +157,39 @@ Profile::create(const SpatialReference* srs,
 }
 
 const Profile*
+Profile::create(const SpatialReference* srs)
+{
+    OE_SOFT_ASSERT_AND_RETURN(srs != nullptr, __func__, nullptr);
+
+    Bounds bounds;
+    if (srs->getBounds(bounds))
+    {
+        unsigned x = 1, y = 1;
+        float ar = (float)bounds.width() / (float)bounds.height();
+        if (ar > 1.5f)
+        {
+            x = (unsigned)::ceil(ar);
+        }
+        else if (ar < 0.5f)
+        {
+            y = (unsigned)::ceil(1.0f / ar);
+        }
+
+        return new Profile(
+            srs,
+            bounds.xMin(), bounds.yMin(), bounds.xMax(), bounds.yMax(),
+            x, y);
+    }
+    else
+    {
+        return create(
+            srs->getHorizInitString(),
+            srs->getVertInitString(),
+            0, 0);
+    }
+}
+
+const Profile*
 Profile::create(const SpatialReference* srs,
                 double xmin, double ymin, double xmax, double ymax,
                 double geoxmin, double geoymin, double geoxmax, double geoymax,
@@ -468,7 +501,7 @@ Profile::getAllKeysAtLOD( unsigned lod, std::vector<TileKey>& out_keys ) const
 }
 
 GeoExtent
-Profile::calculateExtent( unsigned int lod, unsigned int tileX, unsigned int tileY )
+Profile::calculateExtent( unsigned int lod, unsigned int tileX, unsigned int tileY ) const
 {
     double width, height;
     getTileDimensions(lod, width, height);
@@ -591,6 +624,13 @@ Profile::clampAndTransformExtent(const GeoExtent& input, bool* out_clamped) cons
     // null checks
     if (input.isInvalid())
         return GeoExtent::INVALID;
+
+    if (input.isWholeEarth())
+    {
+        if (out_clamped && !getExtent().isWholeEarth())
+            *out_clamped = true;
+        return getExtent();
+    }
 
     // begin by transforming the input extent to this profile's SRS.
     GeoExtent inputInMySRS = input.transform(getSRS());

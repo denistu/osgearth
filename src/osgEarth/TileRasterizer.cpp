@@ -38,120 +38,56 @@
 #define GL_COLOR_ATTACHMENT0 0x8CE0
 #endif
 
+// Set this to use a Pixel Buffer Object for DMA readback.
+#define USE_PBO
+
 using namespace osgEarth;
 using namespace osgEarth::Util;
 
 
-TileRasterizer::RenderInstaller::RenderInstaller(TileRasterizer::RenderData& renderData) : 
-    _renderData(renderData)
-{
-    setCullingActive(false);
-    setUseDisplayList(false);
-}
-
-void
-TileRasterizer::RenderInstaller::drawImplementation(osg::RenderInfo& ri) const
-{
-    // capture the GC and save it as our graphics op queue.
-    osg::ref_ptr<osg::GraphicsContext> gc = _renderData._gc.get();
-    if (gc.valid() == false)
-    {
-        static Threading::Mutex s_mutex(OE_MUTEX_NAME);
-        gc = _renderData._gc.get();
-        if (gc.valid() == false)
-        {
-            _renderData._gc = ri.getState()->getGraphicsContext();
-            _renderData._sv->setState(ri.getState());
-            OE_WARN << LC << "Installed on GC " << _renderData._gc.get() << std::endl;
-        }
-    }
-}
-
-TileRasterizer::RenderOperation::RenderOperation(osg::Node* node, const GeoExtent& extent, TileRasterizer::RenderData& renderData) :
-    osg::GraphicsOperation("TileRasterizer", false),
-    _node(node),
-    _extent(extent),
-    _renderData(renderData),
-    _pass(0)
-{
-    //nop
-}
-
-Future<osg::Image>
-TileRasterizer::RenderOperation::getFuture()
-{
-    return _promise.getFuture();
-}
-
-void 
-TileRasterizer::RenderOperation::operator () (osg::GraphicsContext* gc)
-{
-    osg::Camera* camera = _renderData._sv->getCamera();
-
-    _image = new osg::Image();
-    _image->allocateImage(_renderData._width, _renderData._height, 1, GL_RGBA, GL_UNSIGNED_BYTE);
-    _image->setInternalTextureFormat(GL_RGBA8);
-
-    // attaching an image tells OSG to automatically call glReadPixels at the 
-    // end of the RenderStage. No opportunity for async readback with a PBO however.
-    camera->detach(camera->COLOR_BUFFER0);
-    camera->attach(camera->COLOR_BUFFER0, _image.get());
-    camera->dirtyAttachmentMap();
-
-    camera->setProjectionMatrixAsOrtho2D(
-        _extent.xMin(), _extent.xMax(),
-        _extent.yMin(), _extent.yMax());
-
-    _renderData._sv->setSceneData(_node.get());
-           
-    unsigned id = gc->getState()->getContextID();
-    osg::GLExtensions* ext = osg::GLExtensions::Get(id, true);
-
-    if (_renderData._samplesQuery[id] == INT_MAX)
-    {
-        ext->glGenQueries(1, &_renderData._samplesQuery[id]);
-    }
-
-    _renderData._sv->cull();
-
-    // initiate a query for samples passing the fragment shader
-    // to see whether we drew anything.
-    GLuint samples = 0u;
-    ext->glBeginQuery(GL_ANY_SAMPLES_PASSED, _renderData._samplesQuery[id]);
-
-    _renderData._sv->draw();
-
-    ext->glEndQuery(GL_ANY_SAMPLES_PASSED);
-    ext->glGetQueryObjectuiv(_renderData._samplesQuery[id], GL_QUERY_RESULT, &samples);
-
-    // nothing rendered? return a NULL image.
-    if (samples == 0u)
-        _image = NULL;
-
-    _promise.resolve(_image.release());
-}
-
-
 TileRasterizer::TileRasterizer(unsigned width, unsigned height)
 {
-    _renderData._initialized = false;
-    _renderData._width = width;
-    _renderData._height = height;
+    setCullingActive(false);
+
+    _cx = std::make_shared<RenderContext>();
+
+    _cx->_width = width;
+    _cx->_height = height;
+
+    _cx->_tex = new osg::Texture2D();
+    _cx->_tex->setTextureSize(_cx->_width, _cx->_height);
+    _cx->_tex->setSourceFormat(GL_RGBA);
+    _cx->_tex->setInternalFormat(GL_RGBA8);
+    _cx->_tex->setSourceType(GL_UNSIGNED_BYTE);
 
     // set up the FBO camera
-    osg::Camera* rtt = new osg::Camera();
-    rtt->setCullingActive(false);
-    rtt->setClearColor(osg::Vec4(0,0,0,0));
-    rtt->setClearMask(GL_COLOR_BUFFER_BIT);
-    rtt->setReferenceFrame(rtt->ABSOLUTE_RF);
-    rtt->setRenderOrder(rtt->PRE_RENDER);
-    rtt->setRenderTargetImplementation(rtt->FRAME_BUFFER_OBJECT);
-    rtt->setImplicitBufferAttachmentMask(0, 0);
-    rtt->setSmallFeatureCullingPixelSize(0.0f);
-    rtt->setViewMatrix(osg::Matrix::identity());
-    rtt->setViewport(0, 0, width, height);
+    _cx->_rtt = new osg::Camera();
+    _cx->_rtt->setCullingActive(false);
+    _cx->_rtt->setClearColor(osg::Vec4(0,0,0,0));
+    _cx->_rtt->setClearMask(GL_COLOR_BUFFER_BIT);
+    _cx->_rtt->setReferenceFrame(osg::Camera::ABSOLUTE_RF);
+    _cx->_rtt->setRenderOrder(osg::Camera::PRE_RENDER);
+    _cx->_rtt->setRenderTargetImplementation(osg::Camera::FRAME_BUFFER_OBJECT);
+    _cx->_rtt->setImplicitBufferAttachmentMask(0, 0);
+    _cx->_rtt->setSmallFeatureCullingPixelSize(0.0f);
+    _cx->_rtt->setViewMatrix(osg::Matrix::identity());
+    _cx->_rtt->setViewport(0, 0, width, height);
+    _cx->_rtt->attach(osg::Camera::COLOR_BUFFER, _cx->_tex.get());
 
-    osg::StateSet* ss = rtt->getOrCreateStateSet();
+    _cx->_rtt->setPreDrawCallback(new DrawCallback(
+        [this](osg::RenderInfo& ri) {this->preDraw(ri); }));
+
+    _cx->_rtt->setPostDrawCallback(new DrawCallback(
+        [this](osg::RenderInfo& ri) {this->postDraw(ri); }));
+
+    _cx->_activeJob = nullptr;
+    _cx->_rttActive = false;
+
+    // GL objects
+    _cx->_samplesQuery = 0;
+    _cx->_pbo = 0;
+
+    osg::StateSet* ss = _cx->_rtt->getOrCreateStateSet();
     ss->setMode(GL_BLEND, 1);
     ss->setMode(GL_CULL_FACE, 0);
     GLUtils::setLighting(ss, 0);
@@ -160,29 +96,6 @@ TileRasterizer::TileRasterizer(unsigned width, unsigned height)
     VirtualProgram* vp = VirtualProgram::getOrCreate(ss);
     vp->setName("TileRasterizer");
     vp->setInheritShaders(false);
-
-    // set up a container for our GL query
-    _renderData._samplesQuery.resize(128u);
-    _renderData._samplesQuery.setAllElementsTo(INT_MAX);
-    _renderData._pbo.resize(128u);
-    _renderData._pbo.setAllElementsTo(INT_MAX);
-
-    // set up a sceneview to render the graph
-    _renderData._sv = new osgUtil::SceneView();
-    _renderData._sv->setAutomaticFlush(true);
-    _renderData._sv->setGlobalStateSet(rtt->getOrCreateStateSet());
-    _renderData._sv->setCamera(rtt, true);
-    _renderData._sv->setDefaults(0u);
-    _renderData._sv->getCullVisitor()->setIdentifier(new osgUtil::CullVisitor::Identifier());
-    _renderData._sv->setFrameStamp(new osg::FrameStamp());
-
-    _installer = new RenderInstaller(_renderData);
-}
-
-bool
-TileRasterizer::valid() const
-{
-    return _renderData._sv.valid();
 }
 
 TileRasterizer::~TileRasterizer()
@@ -190,26 +103,128 @@ TileRasterizer::~TileRasterizer()
     //nop
 }
 
-osg::Node*
-TileRasterizer::getNode() const
-{
-    return _installer.get();
-}
-
-Future<osg::Image>
+Future<osg::ref_ptr<osg::Image>>
 TileRasterizer::render(osg::Node* node, const GeoExtent& extent)
 {
-    if (_renderData._sv.valid())
+    ScopedMutexLock lock(_queue);
+
+    RenderJob* job = new RenderJob();
+    job->_node = node;
+    job->_extent = extent;
+    Future<osg::ref_ptr<osg::Image>> result = job->_promise.getFuture();
+    _queue.push(job);
+    return result;
+}
+
+void
+TileRasterizer::traverse(osg::NodeVisitor& nv)
+{
+    if (nv.getVisitorType() == nv.CULL_VISITOR)
     {
-        osg::ref_ptr<osg::GraphicsContext> gc = _renderData._gc.get();
-        if (gc.valid())
+        if (!_queue.empty() && !_cx->_rttActive.exchange(true))
         {
-            osg::ref_ptr<RenderOperation> op = new RenderOperation(node, extent, _renderData);
-            Future<osg::Image> result = op->getFuture();   
-            gc->add(op.get());
-            return result;
+            ScopedMutexLock lock(_queue);
+            if (!_queue.empty())
+            {
+                RenderJob* job = _queue.front();
+                _queue.pop();
+                _cx->_activeJob = job;
+            }
+
+            if (_cx->_activeJob)
+            {
+                _cx->_rtt->setProjectionMatrixAsOrtho2D(
+                    _cx->_activeJob->_extent.xMin(), _cx->_activeJob->_extent.xMax(),
+                    _cx->_activeJob->_extent.yMin(), _cx->_activeJob->_extent.yMax());
+
+                _cx->_rtt->removeChildren(0, _cx->_rtt->getNumChildren());
+
+                _cx->_rtt->addChild(_cx->_activeJob->_node.get());
+                
+                _cx->_rtt->accept(nv);
+            }
+            else
+            {
+                _cx->_rttActive.exchange(false);
+            }
+        }
+    }    
+}
+
+void
+TileRasterizer::preDraw(osg::RenderInfo& ri)
+{
+    unsigned id = ri.getContextID();
+    osg::GLExtensions* ext = osg::GLExtensions::Get(id, true);
+
+#ifdef USE_PBO
+    if (_cx->_pbo == 0 && ext->isPBOSupported)
+    {
+        // Allocate a pixel buffer object for DMA readback
+        unsigned size = _cx->_width * _cx->_height * 4u;
+        ext->glGenBuffers(1, &_cx->_pbo);
+        ext->glBindBuffer(GL_PIXEL_PACK_BUFFER_ARB, _cx->_pbo);
+        ext->glBufferData(GL_PIXEL_PACK_BUFFER_ARB, size, 0, GL_STREAM_READ);
+    }
+#endif
+
+    if (_cx->_samplesQuery == 0)
+    {
+        // Allocate a sample-counting query
+        ext->glGenQueries(1, &_cx->_samplesQuery);
+    }
+
+    _cx->_samples = 0u;
+    ext->glBeginQuery(GL_ANY_SAMPLES_PASSED, _cx->_samplesQuery);
+}
+
+void
+TileRasterizer::postDraw(osg::RenderInfo& ri)
+{
+    osg::ref_ptr<osg::Image> image;
+    osg::GLExtensions* ext = ri.getState()->get<osg::GLExtensions>();
+
+    // finalize the samples query
+    {
+        OE_PROFILING_ZONE_NAMED("glEndQuery/glGet");
+        ext->glEndQuery(GL_ANY_SAMPLES_PASSED);
+        ext->glGetQueryObjectuiv(_cx->_samplesQuery, GL_QUERY_RESULT, &_cx->_samples);
+    }
+
+    if (_cx->_samples > 0)
+    {
+        // create our new target image:
+        image = new osg::Image();
+        image->allocateImage(_cx->_width, _cx->_height, 1, _cx->_tex->getSourceFormat(), _cx->_tex->getSourceType());
+        image->setInternalTextureFormat(_cx->_tex->getInternalFormat());
+
+        OE_PROFILING_ZONE_NAMED("Readback");
+
+        // make the target texture current so we can read it back.
+        _cx->_tex->apply(*ri.getState());
+
+        if (_cx->_pbo > 0)
+        {
+            // Use the PBO to perform a DMA transfer (faster than straight glReadPixels)
+            ext->glBindBuffer(GL_PIXEL_PACK_BUFFER_ARB, _cx->_pbo);
+            glGetTexImage(GL_TEXTURE_2D, 0, _cx->_tex->getSourceFormat(), _cx->_tex->getSourceType(), 0);
+            GLubyte* src = (GLubyte*)ext->glMapBuffer(GL_PIXEL_PACK_BUFFER_ARB, GL_READ_ONLY_ARB);
+            if (src)
+            {
+                memcpy(image->data(), src, image->getTotalSizeInBytes());
+                ext->glUnmapBuffer(GL_PIXEL_PACK_BUFFER_ARB);
+            }
+            ext->glBindBuffer(GL_PIXEL_PACK_BUFFER_ARB, 0);
+        }
+        else
+        {
+            image->readImageFromCurrentTexture(ri.getContextID(), false);
         }
     }
 
-    return Future<osg::Image>();
+    _cx->_activeJob->_promise.resolve(image);
+    _cx->_activeJob = nullptr;
+
+    // unblock for the next frame.
+    _cx->_rttActive.exchange(false);
 }

@@ -79,6 +79,7 @@ TerrainEngineNode::getResources() const
     return _textureResourceTracker.get();
 }
 
+
 //------------------------------------------------------------------------
 
 
@@ -118,12 +119,6 @@ TerrainEngineNode::requestRedraw()
         ViewVisitor<RequestRedraw> visitor;
         this->accept(visitor);
     }
-}
-
-void
-TerrainEngineNode::dirtyTerrain()
-{
-    requestRedraw();
 }
 
 void

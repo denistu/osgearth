@@ -29,6 +29,7 @@
 #include <osgEarth/ShaderUtils>
 #include <osgEarth/LineDrawable>
 #include <osgEarth/GLUtils>
+#include <osgEarth/Utils>
 
 #include <osg/Texture2D>
 #include <osg/Texture2DArray>
@@ -185,6 +186,8 @@ _constrainRttBoxToDrapingSetBounds(true),
 _useProjectionFitting(true),
 _minNearFarRatio(0.25)
 {
+    _manager = std::make_shared<DrapingManager>();
+
     if (::getenv("OSGEARTH_DRAPING_DEBUG"))
         _debug = true;
 
@@ -274,7 +277,7 @@ CascadeDrapingDecorator::traverse(osg::NodeVisitor& nv)
             // only proceed if there is geometry to drape.
             // TODO: is this correct? if there's nothing, should we clear out any
             // pre-existing projected texture or set a uniform or something?
-            const osg::BoundingSphere& bound = _manager.get(camera).getBound();
+            const osg::BoundingSphere& bound = _manager->get(camera).getBound();
             if (bound.valid())
             {
                 // if we don't have a texture unit reserved, do so now.
@@ -348,7 +351,7 @@ namespace
     class DrapingCamera : public osg::Camera
     {
     public:
-        DrapingCamera(DrapingManager& dm, const osg::Camera* parentCamera) 
+        DrapingCamera(std::shared_ptr<DrapingManager> dm, const osg::Camera* parentCamera)
             : osg::Camera(), _parentCamera(parentCamera), _dm(dm)
         {
             setCullingActive( false );
@@ -363,7 +366,7 @@ namespace
 
         void traverse(osg::NodeVisitor& nv)
         {
-            DrapingCullSet& cullSet = _dm.get(_parentCamera);
+            DrapingCullSet& cullSet = _dm->get(_parentCamera);
             cullSet.accept( nv );
 
             // manhandle the render bin sorting, since OSG ignores the override
@@ -391,7 +394,7 @@ namespace
     protected:
         virtual ~DrapingCamera() { }
         const osg::Camera* _parentCamera;
-        DrapingManager& _dm;
+        std::shared_ptr<DrapingManager> _dm;
     };
 
 
@@ -525,6 +528,7 @@ CascadeDrapingDecorator::CameraLocal::initialize(osg::Camera* camera, CascadeDra
     osg::Texture::FilterMode minifyFilter, magnifyFilter;
     osg::Vec4 clearColor;
     bool mipmapping = decorator._mipmapping;
+    float anisotropy;
 
     // if the master cam is a picker, just limit to one cascade with no sampling.
     bool isPickCamera = camera->getName() == "osgEarth::RTTPicker";
@@ -538,6 +542,7 @@ CascadeDrapingDecorator::CameraLocal::initialize(osg::Camera* camera, CascadeDra
         magnifyFilter = osg::Texture::NEAREST;
         clearColor.set(0,0,0,0);
         mipmapping = false;
+        anisotropy = 1.0f;
     }
     else
     {
@@ -548,6 +553,7 @@ CascadeDrapingDecorator::CameraLocal::initialize(osg::Camera* camera, CascadeDra
         minifyFilter = mipmapping? osg::Texture::LINEAR_MIPMAP_LINEAR : osg::Texture::LINEAR;
         magnifyFilter = osg::Texture::LINEAR;
         clearColor.set(1,1,1,0);
+        anisotropy = 4.0f;
     }
 
     // Create the shared draping texture.
@@ -561,7 +567,7 @@ CascadeDrapingDecorator::CameraLocal::initialize(osg::Camera* camera, CascadeDra
     tex->setFilter(tex->MAG_FILTER, magnifyFilter);
     tex->setWrap(tex->WRAP_S, tex->CLAMP_TO_EDGE);
     tex->setWrap(tex->WRAP_T, tex->CLAMP_TO_EDGE);
-    tex->setMaxAnisotropy(4.0f);
+    tex->setMaxAnisotropy(anisotropy);
     
     // set up the global RTT camera state:
     _rttSS = new osg::StateSet();
@@ -631,7 +637,7 @@ CascadeDrapingDecorator::CameraLocal::initialize(osg::Camera* camera, CascadeDra
 
     // bind the projected texture
     _terrainSS->setTextureAttributeAndModes(decorator._unit, tex, 1);
-    _terrainSS->getOrCreateUniform("oe_Draping_tex", osg::Uniform::SAMPLER_2D)->set((int)decorator._unit);
+    _terrainSS->getOrCreateUniform("oe_Draping_tex", osg::Uniform::SAMPLER_2D_ARRAY)->set((int)decorator._unit);
     _terrainSS->setDefine("OE_DRAPING_MAX_CASCADES", Stringify() << decorator._maxCascades);
     
     // install the shader program to project a texture on the terrain
@@ -897,10 +903,13 @@ CascadeDrapingDecorator::CameraLocal::traverse(osgUtil::CullVisitor* cv, Cascade
 
     if (decorator._srs->isGeographic())
     {
-        Horizon* horizon = Horizon::get(*cv);
-        horizon->getPlane(horizonPlane);
-        dh = horizon->getDistanceToVisibleHorizon();
-        dp = horizonPlane.distance(camEye);
+        osg::ref_ptr<Horizon> horizon;
+        if (ObjectStorage::get(cv, horizon))
+        {
+            horizon->getPlane(horizonPlane);
+            dh = horizon->getDistanceToVisibleHorizon();
+            dp = horizonPlane.distance(camEye);
+        }
     }
     else
     {
