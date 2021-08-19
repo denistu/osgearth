@@ -65,7 +65,7 @@ LifeMapLayer::Options::getConfig() const
 {
     Config conf = VisibleLayer::Options::getConfig();
     biomeLayer().set(conf, "biomes_layer");
-    densityMaskLayer().set(conf, "density_mask_layer");
+    maskLayer().set(conf, "mask_layer");
     colorLayer().set(conf, "color_layer");
     landUseLayer().set(conf, "land_use_layer");
     conf.set("use_land_cover", useLandCover());
@@ -84,7 +84,7 @@ LifeMapLayer::Options::fromConfig(const Config& conf)
     slopeIntensity() = 1.0f;
 
     biomeLayer().get(conf, "biomes_layer");
-    densityMaskLayer().get(conf, "density_mask_layer");
+    maskLayer().get(conf, "mask_layer");
     colorLayer().get(conf, "color_layer");
     landUseLayer().get(conf, "land_use_layer");
     conf.get("use_land_cover", useLandCover());
@@ -95,12 +95,6 @@ LifeMapLayer::Options::fromConfig(const Config& conf)
 
 namespace
 {
-    // The four components of a LifeMap pixel
-    constexpr unsigned RUGGED = 0;
-    constexpr unsigned DENSE = 1;
-    constexpr unsigned LUSH = 2;
-    constexpr unsigned SPECIAL = 3;
-
     // noise channels
     constexpr unsigned SMOOTH = 0;
     constexpr unsigned RANDOM = 1;
@@ -195,7 +189,6 @@ namespace
         }
 
         const LifeMapValue* get(double x, double y, const LifeMapValueTable* table) const
-
         {
             _tilesrs->transform2D(x, y, _featuresrs, x, y);
 
@@ -206,7 +199,7 @@ namespace
             std::vector<osg::ref_ptr<Feature>> hits;
 
             if (_index.Search(a_min, a_max, &hits, ~0) == 0)
-                return false;
+                return nullptr;
 
             const LifeMapValue* result = nullptr;
 
@@ -223,7 +216,7 @@ namespace
                         return result;
                 }
             }
-            return false;
+            return nullptr;
         }
     };
 }
@@ -234,6 +227,10 @@ void
 LifeMapLayer::init()
 {
     ImageLayer::init();
+
+    // LifeMap is invisible AND shared by default.
+    options().visible().setDefault(false);
+    options().shared().setDefault(true);
 
     NoiseTextureFactory nf;
     _noiseFunc = nf.createImage(1024u, 4u);
@@ -246,13 +243,13 @@ LifeMapLayer::openImplementation()
     if (parent.isError())
         return parent;
 
-    options().densityMaskLayer().open(getReadOptions());
+    options().maskLayer().open(getReadOptions());
 
     options().colorLayer().open(getReadOptions());
 
     options().landUseLayer().open(getReadOptions());
 
-    setProfile(Profile::create("global-geodetic"));
+    setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
     return Status::OK();
 }
 
@@ -268,7 +265,7 @@ LifeMapLayer::addedToMap(const Map* map)
     ImageLayer::addedToMap(map);
 
     options().biomeLayer().addedToMap(map);
-    options().densityMaskLayer().addedToMap(map);
+    options().maskLayer().addedToMap(map);
     options().colorLayer().addedToMap(map);
     options().landUseLayer().addedToMap(map);
 
@@ -311,7 +308,7 @@ LifeMapLayer::removedFromMap(const Map* map)
 {
     _map = nullptr;
     options().biomeLayer().removedFromMap(map);
-    options().densityMaskLayer().removedFromMap(map);
+    options().maskLayer().removedFromMap(map);
     options().colorLayer().removedFromMap(map);
     ImageLayer::removedFromMap(map);
 }
@@ -329,15 +326,15 @@ LifeMapLayer::getBiomeLayer() const
 }
 
 void
-LifeMapLayer::setDensityMaskLayer(ImageLayer* layer)
+LifeMapLayer::setMaskLayer(ImageLayer* layer)
 {
-    options().densityMaskLayer().setLayer(layer);
+    options().maskLayer().setLayer(layer);
 }
 
 ImageLayer*
-LifeMapLayer::getDensityMaskLayer() const
+LifeMapLayer::getMaskLayer() const
 {
-    return options().densityMaskLayer().getLayer();
+    return options().maskLayer().getLayer();
 }
 
 void
@@ -500,13 +497,13 @@ LifeMapLayer::createImageImplementation(
     osg::Matrixf dm_matrix;
 
     // the mask layer zero's out density(etc)
-    if (getDensityMaskLayer())
+    if (getMaskLayer())
     {
         TileKey dm_key(key);
 
         while(dm_key.valid() && !densityMask.valid())
         {
-            densityMask = getDensityMaskLayer()->createImage(dm_key, progress);
+            densityMask = getMaskLayer()->createImage(dm_key, progress);
             if (!densityMask.valid())
                 dm_key.makeParent();
         }
@@ -615,8 +612,8 @@ LifeMapLayer::createImageImplementation(
             //noise[1][SMOOTH];
 
         float rugged_noise =
-            0.5*noise[1][CLUMPY] +
-            0.5*noise[2][RANDOM];
+            0.5*noise[1][SMOOTH] +
+            0.5*noise[2][CLUMPY];
 
 
         // LAND USE CONTRIBUTION:
@@ -679,7 +676,7 @@ LifeMapLayer::createImageImplementation(
 
                     if (value->dense().isSet())
                     {
-                        float dn = has_special ? 0.0f : (dense_noise*2.0f - 1.0f)*noise[ni][RANDOM];
+                        float dn = has_special ? 0.0f : (dense_noise*2.0f - 1.0f)*noise[ni][CLUMPY];
                         //sample[LANDCOVER].dense.value = value->dense().get() + 0.2*(dense_noise*2.0 - 1.0);
                         sample[LANDCOVER].dense.value = value->dense().get() + dn;
                         sample[LANDCOVER].dense.weight = 1.0f;
@@ -687,7 +684,7 @@ LifeMapLayer::createImageImplementation(
 
                     if (value->lush().isSet())
                     {
-                        float dn = has_special ? 0.0f : (lush_noise*2.0f - 1.0f)*noise[ni][CLUMPY];
+                        float dn = has_special ? 0.0f : (lush_noise*2.0f - 1.0f)*noise[ni][RANDOM];
                         //sample[LANDCOVER].lush.value = value->lush().get() + 0.2*(lush_noise*2.0 - 1.0);
                         sample[LANDCOVER].lush.value = value->lush().get() + dn;
                         sample[LANDCOVER].lush.weight = 1.0f;
@@ -803,24 +800,24 @@ LifeMapLayer::createImageImplementation(
         for (int i = 0; i < 4; ++i)
         {
             dense_factor = sample[i].dense.weight*sample[i].weight;
-            pixel[DENSE] += sample[i].dense.value*dense_factor;
+            pixel[LIFEMAP_DENSE] += sample[i].dense.value*dense_factor;
             dense_total += dense_factor;
             
             lush_factor = sample[i].lush.weight*sample[i].weight;
-            pixel[LUSH] += sample[i].lush.value*lush_factor;
+            pixel[LIFEMAP_LUSH] += sample[i].lush.value*lush_factor;
             lush_total += lush_factor;
 
             rugged_factor = sample[i].rugged.weight*sample[i].weight;
-            pixel[RUGGED] += sample[i].rugged.value*rugged_factor;
+            pixel[LIFEMAP_RUGGED] += sample[i].rugged.value*rugged_factor;
             rugged_total += rugged_factor;
 
             if (sample[i].special > 0)
-                pixel[SPECIAL] = (float)sample[i].special / 255.0f;
+                pixel[LIFEMAP_SPECIAL] = (float)sample[i].special / 255.0f;
         }
 
         // for a special encoding, zero out the other values
-        if (pixel[SPECIAL] > 0)
-            pixel[RUGGED] = pixel[DENSE] = pixel[LUSH] = 0.0f;
+        if (pixel[LIFEMAP_SPECIAL] > 0)
+            pixel[LIFEMAP_RUGGED] = pixel[LIFEMAP_DENSE] = pixel[LIFEMAP_LUSH] = 0.0f;
 
         // MASK CONTRIBUTION (applied to final data)
         if (densityMask.valid())
@@ -829,9 +826,9 @@ LifeMapLayer::createImageImplementation(
             double vv = clamp(i.v() * dm_matrix(1, 1) + dm_matrix(3, 1), 0.0, 1.0);
             readDensityMask(dm_pixel, uu, vv);
 
-            pixel[DENSE] *= dm_pixel.r();
-            pixel[LUSH] *= (0.25 + 0.75*dm_pixel.r()); // 75% effect
-            pixel[RUGGED] *= dm_pixel.r();
+            pixel[LIFEMAP_DENSE] *= dm_pixel.r();
+            pixel[LIFEMAP_LUSH] *= (0.25 + 0.75*dm_pixel.r()); // 75% effect
+            pixel[LIFEMAP_RUGGED] *= dm_pixel.r();
         }
 
         for (int i = 0; i < 4; ++i)

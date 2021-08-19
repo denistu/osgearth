@@ -32,6 +32,7 @@ namespace osgEarth {
             NetworkMonitorGUI() :
                 BaseGUI("Network Monitor"),
                 _showOnlyActiveRequests(true),
+                _showOnlyFailedRequests(false),
                 _filter("")
             {
 
@@ -66,6 +67,9 @@ namespace osgEarth {
                     }
 
                     ImGui::Checkbox("Active", &_showOnlyActiveRequests);
+                    
+                    ImGui::SameLine();
+                    ImGui::Checkbox("Failed", &_showOnlyFailedRequests);
 
                     ImGui::SameLine();
                     if (ImGui::Button("Clear"))
@@ -130,19 +134,31 @@ namespace osgEarth {
                             }
 
                             ImVec4 color = ImVec4(1.0, 1.0, 1.0, 1.0);
+                            bool failed = false;
+                            bool canceled = false;
                             if (itr->second.isComplete)
                             {
-                                if (strstr(itr->second.status.c_str(), "OK") != NULL)
+                                if (itr->second.status.find("OK") != std::string::npos)
                                 {
-                                    // Color OK requests green
-                                    color = ImVec4(0.0, 1.0, 0.0, 1.0);
+                                    color = ImVec4(0, 1, 0, 1); // green
+                                }
+                                else if (itr->second.status.find("Canceled") != std::string::npos)
+                                {
+                                    color = ImVec4(.5,.5,.5,1); // grey
+                                    canceled = true;
                                 }
                                 else
                                 {
                                     // Color bad requests red
-                                    color = ImVec4(1.0, 0.0, 0.0, 1.0);
+                                    color = ImVec4(1, 0, 0, 1);
+                                    failed = true;
                                 }
                             }
+
+                            if (_showOnlyFailedRequests && !failed)
+                                continue;
+
+                            ImGui::PushID(itr->first);
 
                             double startMS = osg::Timer::instance()->delta_m(startTime, itr->second.startTime);
                             double endMS = 0.0;
@@ -165,7 +181,14 @@ namespace osgEarth {
                             //ImGui::Text("%.2lf ms", endMS); ImGui::NextColumn();
                             ImGui::Text(itr->second.type.c_str()); ImGui::NextColumn();
                             ImGui::Text(itr->second.status.c_str()); ImGui::NextColumn();
-                            ImGui::TextColored(color, itr->second.uri.c_str());  ImGui::NextColumn();
+
+                            if (ImGui::SmallButton("Copy"))
+                            {
+                                ImGui::SetClipboardText(itr->second.uri.c_str());
+                            }
+                            ImGui::SameLine();
+                            ImGui::TextColored(color, "%s (%d)", itr->second.uri.c_str(), itr->second.count);  ImGui::NextColumn();
+                            ImGui::PopID();
                         }
                     }
                     ImGui::Columns(1);
@@ -187,6 +210,7 @@ namespace osgEarth {
             }
 
             bool _showOnlyActiveRequests;
+            bool _showOnlyFailedRequests;
             char _filter[128];
         };
     }

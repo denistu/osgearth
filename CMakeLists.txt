@@ -5,16 +5,18 @@ if(COMMAND cmake_policy)
     # have absolute paths (e.g. -lpthreads)
     cmake_policy(SET CMP0003 NEW)
 
-    # Works around warnings about escaped quotes in ADD_DEFINITIONS
-    # statements.
-    cmake_policy(SET CMP0005 OLD)
-
     # Qt5 qt5_use_modules usage was causing "Policy CMP0043 is not set: Ignore COMPILE_DEFINITIONS_<Config> properties." warnings
     cmake_policy(SET CMP0043 NEW)
 
     # Double colon in target name means IMPORTED (and not ALIAS or IMPORTED).
     # Fixes a warning when cache_rocksdb links to target "RocksDB::rocksdb"
     cmake_policy(SET CMP0028 NEW)
+    
+    # Defaults find_package to using *_ROOT, which did not become the default
+    # policy until CMake 3.12
+    if (POLICY CMP0074)
+        cmake_policy(SET CMP0074 NEW)
+    endif()
 endif(COMMAND cmake_policy)
 
 # Set up CMake to use Solution Folders in Visual Studio.
@@ -25,11 +27,11 @@ PROJECT(OSGEARTH)
 
 # SDK version number (informational)
 SET(OSGEARTH_MAJOR_VERSION 3)
-SET(OSGEARTH_MINOR_VERSION 1)
+SET(OSGEARTH_MINOR_VERSION 2)
 SET(OSGEARTH_PATCH_VERSION 0)
 
 # Increment this each time the ABI changes
-SET(OSGEARTH_SOVERSION 109)
+SET(OSGEARTH_SOVERSION 117)
 
 # C++11 is required for osgEarth 3.x
 set_property(GLOBAL PROPERTY CXX_STANDARD 11)
@@ -102,7 +104,8 @@ option(OSGEARTH_BUILD_TOOLS "Build the osgEarth command-line tools" ON)
 option(OSGEARTH_BUILD_EXAMPLES "Build the osgEarth example applications" ON)
 option(OSGEARTH_BUILD_TESTS "Build the osgEarth unit tests" ON)
 
-option(OSGEARTH_BUILD_PROCEDURAL_NODEKIT "Build the procedural terrain nodekit (splat/procedural)" OFF)
+option(OSGEARTH_BUILD_PROCEDURAL_NODEKIT "Build the procedural terrain nodekit (osgEarthProcedural)" OFF)
+option(OSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT "Build the legacy procedural nodekit (osgEarthSplat)" OFF)
 option(OSGEARTH_BUILD_TRITON_NODEKIT "Build support for SunDog Triton SDK" OFF)
 option(OSGEARTH_BUILD_SILVERLINING_NODEKIT "Build support for SunDog SilverLining SDK" OFF)
 option(OSGEARTH_BUILD_LEVELDB_CACHE "Build the LevelDB cache plugin" OFF)
@@ -125,6 +128,20 @@ IF (OSGEARTH_USE_GLES)
 ELSE ()
     find_package(OpenGL)
 ENDIF (OSGEARTH_USE_GLES)
+
+
+# Update git submodules in case the user didn't do it already
+# https://cliutils.gitlab.io/modern-cmake/chapters/projects/submodule.html
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
+    message(STATUS "Submodule update")
+    execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    RESULT_VARIABLE GIT_SUBMOD_RESULT)
+    if(NOT GIT_SUBMOD_RESULT EQUAL "0")
+        message(FATAL_ERROR "git submodule update --init --recursive failed with ${GIT_SUBMOD_RESULT}, please checkout submodules")
+    endif()
+endif()
 
 # required
 find_package(OSG REQUIRED)

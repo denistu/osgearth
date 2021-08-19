@@ -240,7 +240,7 @@ void oe_GroundCover_Billboard(inout vec4 vertex_view, in uint i)
         Z = cross(E, N);
 
         // now introduce a "random" rotation
-        vec2 b = normalize(clamp(vec2(noise[NOISE_RANDOM], noise[NOISE_RANDOM_2]), 0.01, 1.0)*2.0-1.0);
+        vec2 b = vec2(instance[i].sinrot, instance[i].cosrot);
         N = normalize(E*b.x + N*b.y);
         E = normalize(cross(N, oe_UpVectorView));
 
@@ -381,9 +381,9 @@ void oe_GroundCover_VS(inout vec4 vertex_view)
 #pragma vp_location   fragment_coloring
 
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
+#pragma import_defines(OE_IS_MULTISAMPLE)
 
 uniform float oe_gc_maxAlpha;
-uniform int oe_gc_isMultisampled;
 
 in vec3 oe_gc_texCoord;
 vec3 vp_Normal;
@@ -442,23 +442,18 @@ void oe_GroundCover_FS(inout vec4 color)
         discard;
     }
 #else
-
-    if (oe_gc_isMultisampled == 1)
-    {
+    #ifdef OE_IS_MULTISAMPLE
         // mitigate the screen-door effect of A2C in the distance
         // https://tinyurl.com/y7bbbpl9
         float a = (color.a - oe_gc_maxAlpha) / max(fwidth(color.a), 0.0001) + 0.5;
         color.a = mix(color.a, a, oe_gc_distance);
-    }
-    else if (color.a < oe_gc_maxAlpha)
-    {
-        discard;
-    }
-#endif
+    #else
+        if (color.a < oe_gc_maxAlpha)
+        {
+            discard;
+        }
+    #endif
 
-    //color.rgb = (vp_Normal+1.0)*0.5;
-
-#ifndef OE_IS_SHADOW_CAMERA
     // TODO: revisit once we can figure out how to get terrain elevation
     float coldness = mapToNormalizedRange(elev, 1000, 3500);
     float cos_angle = clamp(dot(vp_Normal, normalize(oe_UpVectorView)), 0, 1);

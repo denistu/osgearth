@@ -43,12 +43,10 @@ namespace osgEarth
 
     namespace Util
     {
-        class ResourceReleaser;
         class DrapingManager;
         class ClampingManager;
         class DrapingTechnique;
         class ClampingTechnique;
-        class MapNodeCullData;
     }
 
     /**
@@ -154,11 +152,6 @@ namespace osgEarth
         TerrainEngine* getTerrainEngine() const;
 
         /**
-         * Gets a service that you can use to release GL objects.
-         */
-        ResourceReleaser* getResourceReleaser() const;
-
-        /**
          * Gets the Config object serializing external data. External data is information
          * that osgEarth itself does not control, but that an app can include in the
          * MapNode for the purposes of including it in a .earth file.
@@ -221,6 +214,15 @@ namespace osgEarth
             float       my,
             GeoPoint&   out_point) const;
 
+        //! Returns the map coordinates under the provided mouse (window) coordinates.
+        //! @param view View in which to do the query
+        //! @param mx, my Mouse coordinates
+        //! @return Outputs the point under the mouse
+        GeoPoint getGeoPointUnderMouse(
+            osg::View* view,
+            float mx,
+            float my) const;
+
     public: // osg::Object
 
         virtual const char* libraryName() const { return "osgEarth"; }
@@ -249,7 +251,6 @@ namespace osgEarth
         Config             _externalConf;
         TerrainEngineNode* _terrainEngine;
         osg::Group*        _terrainGroup;
-        ResourceReleaser*  _resourceReleaser;
         std::shared_ptr<DrapingManager> _drapingManager;
         ClampingManager*   _clampingManager;
         std::atomic<bool>  _readyForUpdate;

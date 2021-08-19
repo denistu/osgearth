@@ -17,7 +17,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
 #include "FeatureSDFLayer"
-#include "TransformFilter"
 #include "FeatureRasterizer"
 #include <osgDB/WriteFile>
 #include <osgDB/FileUtils>
@@ -36,6 +35,7 @@ FeatureSDFLayer::Options::getConfig() const
     Config conf = ImageLayer::Options::getConfig();
     featureSource().set(conf, "features");
     styleSheet().set(conf, "styles");
+    conf.set("inverted", inverted());
 
     if (filters().empty() == false)
     {
@@ -51,8 +51,11 @@ FeatureSDFLayer::Options::getConfig() const
 void
 FeatureSDFLayer::Options::fromConfig(const Config& conf)
 {
+    inverted().setDefault(false);
+
     featureSource().get(conf, "features");
     styleSheet().get(conf, "styles");
+    conf.get("inverted", inverted());
 
     const Config& filtersConf = conf.child("filters");
     for (ConfigSet::const_iterator i = filtersConf.children().begin(); i != filtersConf.children().end(); ++i)
@@ -67,11 +70,21 @@ FeatureSDFLayer::init()
     // Default profile (WGS84) if not set
     if (!getProfile())
     {
-        setProfile(Profile::create("global-geodetic"));
+        //setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
     }
 
     // enable GPU processing if available
     _sdfGenerator.setUseGPU(true);
+}
+
+void
+FeatureSDFLayer::setInverted(bool value) {
+    options().inverted() = value;
+}
+
+bool
+FeatureSDFLayer::getInverted() const {
+    return options().inverted().get();
 }
 
 Status
@@ -203,6 +216,7 @@ FeatureSDFLayer::updateSession()
                 dataExtents().push_back(DataExtent(fp->getExtent()));
             }
 
+#if 0 // hopefully fixed
             // warn the user if the feature data is tiled and the
             // layer profile doesn't match the feature source profile
             if (fp->isTiled() &&
@@ -211,6 +225,7 @@ FeatureSDFLayer::updateSession()
                 OE_WARN << LC << "Layer profile doesn't match feature tiling profile - data may not render properly" << std::endl;
                 OE_WARN << LC << "(Feature tiling profile = " << fp->getTilingProfile()->toString() << ")" << std::endl;
             }
+#endif
         }
 
         _session->setFeatureSource(getFeatureSource());
@@ -258,7 +273,8 @@ FeatureSDFLayer::createImageImplementation(
     // which indicates maximum distance.
     GeoImage sdf = _sdfGenerator.allocateSDF(
         getTileSize(),
-        key.getExtent());
+        key.getExtent(),
+        GL_RED);
 
     // Rasterizer for rendering features to an image. We are going to make this
     // larger than the final SDF so we can properly calculate distances to features
@@ -295,6 +311,8 @@ FeatureSDFLayer::createImageImplementation(
         if (features.empty())
             return;
 
+        // TODO: bin as line or poly??
+
         // Render features to a temporary image
         Style r_style;
         if (features.front()->getGeometry()->isLinear())
@@ -303,10 +321,10 @@ FeatureSDFLayer::createImageImplementation(
             r_style.getOrCreate<PolygonSymbol>()->fill()->color() = Color::Black;
 
         rasterizer.render(
-            _session.get(), 
+            features,
             r_style,
-            _session->getFeatureSource()->getFeatureProfile(), 
-            features);
+            _session->getFeatureSource()->getFeatureProfile(),
+            _session->styles());
     };
 
     FeatureStyleSorter::Function renderSDF = [&](
@@ -320,8 +338,8 @@ FeatureSDFLayer::createImageImplementation(
         double toMeters = 1.0;
         if (sdfExtent.getSRS()->isGeographic())
         {
-            double R = sdfExtent.getSRS()->getEllipsoid()->getRadiusEquator();
-            toMeters = (2.0 * osg::PI * R / 360.0) * cos(osg::DegreesToRadians(sdfExtent.yMin()));
+            double LAT = sdfExtent.yMin() >= 0.0 ? sdfExtent.yMin() : sdfExtent.yMax();
+            toMeters = sdfExtent.getSRS()->getEllipsoid().longitudinalDegreesToMeters(1.0, LAT);
         }
 
         _sdfGenerator.createDistanceField(
@@ -349,6 +367,7 @@ FeatureSDFLayer::createImageImplementation(
     // create a NN field from the rasterized data:
     _sdfGenerator.createNearestNeighborField(
         rasterizedFeatures,
+        options().inverted().get(),
         nnfield,
         progress);
 
@@ -361,9 +380,30 @@ FeatureSDFLayer::createImageImplementation(
         renderSDF,
         progress);
 
-    //osgDB::makeDirectoryForFile(Stringify() << "out/" << key.str() << ".out.png");
-    //osgDB::writeImageFile(*rasterizedFeatures.getImage(), Stringify() << "out/" << key.str() << ".out.png");
-    //osgDB::writeImageFile(*sdf.getImage(), Stringify() << "out/" << key.str() << ".sdf.png");
+#if 0
+    osg::ref_ptr<osg::Image> nn = new osg::Image();
+    nn->allocateImage(nnfield.getImage()->s(), nnfield.getImage()->t(), 1, GL_RGBA, GL_UNSIGNED_BYTE);
+    osg::Vec4f p;
+    ImageUtils::PixelReader read_nnf(nnfield.getImage());
+    ImageUtils::PixelWriter write_out(nn.get());
+    ImageUtils::ImageIterator i(read_nnf);
+    i.forEachPixel([&]()
+        {
+            read_nnf(p, i.s(), i.t());
+            p.set(
+                p.x() / (float)(nn->s() - 1),
+                p.y() / (float)(nn->t() - 1),
+                0,
+                1);
+            write_out(p, i.s(), i.t());
+        }
+    );
+
+    osgDB::makeDirectoryForFile(Stringify() << "out/" << key.str() << ".out.png");
+    osgDB::writeImageFile(*rasterizedFeatures.getImage(), Stringify() << "out/" << key.str() << ".out.png");
+    osgDB::writeImageFile(*nn.get(), Stringify() << "out/" << key.str() << ".nn.png");
+    osgDB::writeImageFile(*sdf.getImage(), Stringify() << "out/" << key.str() << ".sdf.png");
+#endif
 
     return sdf;
 }

@@ -9,7 +9,7 @@ uniform sampler2D oe_gc_noiseTex;
 #define NOISE_RANDOM_2 2
 #define NOISE_CLUMPY   3
 
-// (LLx, LLy, URx, URy, tileNum
+// (LLx, LLy, URx, URy, tileNum)
 uniform float oe_tile[5];
 
 uniform vec2 oe_tile_elevTexelCoeff;
@@ -21,13 +21,6 @@ uniform float oe_GroundCover_colorMinSaturation;
 #pragma import_defines(OE_LANDCOVER_TEX_MATRIX)
 uniform sampler2D OE_LANDCOVER_TEX;
 uniform mat4 OE_LANDCOVER_TEX_MATRIX;
-
-#pragma import_defines(OE_GROUNDCOVER_MASK_SAMPLER)
-#pragma import_defines(OE_GROUNDCOVER_MASK_MATRIX)
-#ifdef OE_GROUNDCOVER_MASK_SAMPLER
-uniform sampler2D OE_GROUNDCOVER_MASK_SAMPLER;
-uniform mat4 OE_GROUNDCOVER_MASK_MATRIX;
-#endif
 
 #pragma import_defines(OE_GROUNDCOVER_COLOR_SAMPLER)
 #pragma import_defines(OE_GROUNDCOVER_COLOR_MATRIX)
@@ -101,9 +94,9 @@ void generate()
 
     int tileNum = int(oe_tile[4]);
 
-    uint local_i =
-        gl_GlobalInvocationID.y * gl_NumWorkGroups.x
-        + gl_GlobalInvocationID.x;
+    uint local_i = 
+        y * gl_NumWorkGroups.x + x;
+
     uint i = 
         tileNum * (gl_NumWorkGroups.x * gl_NumWorkGroups.y)
         + local_i;
@@ -124,13 +117,6 @@ void generate()
 
 #ifdef OE_GROUNDCOVER_COLOR_SAMPLER
     if (!isLegalColor(tilec))
-        return;
-#endif
-
-    // If we're using a mask texture, sample it now:
-#ifdef OE_GROUNDCOVER_MASK_SAMPLER
-    float mask = texture(OE_GROUNDCOVER_MASK_SAMPLER, (OE_GROUNDCOVER_MASK_MATRIX*tilec4).st).a;
-    if (mask > 0.0)
         return;
 #endif
 
@@ -156,7 +142,7 @@ void generate()
     int assetIndex = biome.offset + pickIndex;
 
     // Recover the asset we randomly picked:
-    Asset asset = assets[assetIndex]; //getAsset(assetIndex);
+    Asset asset = assets[assetIndex];
 
     fill *= asset.fill;
 
@@ -212,10 +198,10 @@ void merge()
 }
 
 
-uniform vec3 oe_VisibleLayer_ranges;
 uniform vec3 oe_Camera;
 uniform int oe_gc_numCommands; // total number of draw commands
 uniform float oe_gc_sse = 100.0; // pixels
+uniform float oe_gc_maxRange;
 
 #define MASK_BILLBOARD 1
 #define MASK_MODEL 2
@@ -234,7 +220,7 @@ void cull()
     vec4 vertex_view = tile[tileNum].modelViewMatrix * instance[i].vertex;
 
     float range = -vertex_view.z;
-    float maxRange = oe_VisibleLayer_ranges[1] / oe_Camera.z;
+    float maxRange = oe_gc_maxRange / oe_Camera.z;
 
     // distance culling:
     if (range >= maxRange)

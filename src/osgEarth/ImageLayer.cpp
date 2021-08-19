@@ -370,18 +370,19 @@ ImageLayer::createImage(
 
     NetworkMonitor::ScopedRequestLayer layerRequest(getName());
 
-    // prevents 2 threads from creating the same object at the same time
-    //TODO use a GATE here on the key?
-    //_sentry.lock(key);
-
     GeoImage result = createImageInKeyProfile( key, progress );
+
+    // Post-cache operations:
 
     for (auto& post : _postLayers)
     {
         result = post->createImage(result, key, progress);
     }
 
-    //_sentry.unlock(key);
+    if (result.valid())
+    {
+        postCreateImageImplementation(result, key, progress);
+    }
 
     return result;
 }
@@ -412,6 +413,13 @@ ImageLayer::createImageInKeyProfile(
     {
         return GeoImage::INVALID;
     }
+
+    // Tile gate prevents two threads from requesting the same key
+    // at the same time, which would be unnecessary work. Only lock
+    // the gate if there is an L2 cache active
+    ScopedGate<TileKey> scopedGate(_sentry, key, [&]() {
+        return _memCache.valid();
+    });
 
     GeoImage result;
 
@@ -469,7 +477,7 @@ ImageLayer::createImageInKeyProfile(
             if (!expired)
             {
                 OE_DEBUG << "Got cached image for " << key.str() << std::endl;
-                return GeoImage( cachedImage.get(), key.getExtent() );
+                return GeoImage(cachedImage.get(), key.getExtent());
             }
             else
             {
@@ -575,6 +583,13 @@ ImageLayer::assembleImage(
 
     if ( intersectingKeys.size() > 0 )
     {
+#if 0
+        GeoExtent ee = key.getExtent().transform(intersectingKeys.front().getProfile()->getSRS());
+        OE_INFO << "Tile " << key.str() << " ... " << ee.toString() << std::endl;
+        for (auto key : intersectingKeys) {
+            OE_INFO << " - " << key.str() << " ... " << key.getExtent().toString() << std::endl;
+        }
+#endif
         double dst_minx, dst_miny, dst_maxx, dst_maxy;
         key.getExtent().getBounds(dst_minx, dst_miny, dst_maxx, dst_maxy);
 
@@ -594,6 +609,7 @@ ImageLayer::assembleImage(
             {
                 if ( !isCoverage() )
                 {
+#if 0
                     // Make sure all images in mosaic are based on "RGBA - unsigned byte" pixels.
                     // This is not the smarter choice (in some case RGB would be sufficient) but
                     // it ensure consistency between all images / layers.
@@ -610,6 +626,7 @@ ImageLayer::assembleImage(
                             image = GeoImage(convertedImg.get(), image.getExtent());
                         }
                     }
+#endif
                 }
 
                 mosaic.getImages().push_back( TileImage(image.getImage(), *k) );
@@ -655,6 +672,7 @@ ImageLayer::assembleImage(
 
                     if ( !isCoverage() )
                     {
+#if 0
                         if (   (image.getImage()->getDataType() != GL_UNSIGNED_BYTE)
                             || (image.getImage()->getPixelFormat() != GL_RGBA) )
                         {
@@ -664,6 +682,7 @@ ImageLayer::assembleImage(
                                 image = GeoImage(convertedImg.get(), image.getExtent());
                             }
                         }
+#endif
 
                         cropped = image.crop( k->getExtent(), false, image.getImage()->s(), image.getImage()->t() );
                     }
@@ -786,4 +805,131 @@ ImageLayer::addPostLayer(ImageLayer* layer)
 {
     ScopedMutexLock lock(_postLayers);
     _postLayers.push_back(layer);
+}
+
+//...................................................................
+
+#define ARENA_ASYNC_LAYER "oe.layer.async"
+//#define FUTURE_IMAGE_COLOR_PLACEHOLDER
+
+FutureImage::FutureImage(
+    ImageLayer* layer,
+    const TileKey& key) :
+
+    osg::Image(),
+    _layer(layer),
+    _key(key),
+    _resolved(false),
+    _failed(false)
+{
+    allocateImage(1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+    unsigned* c = (unsigned*)(data(0, 0));
+#ifdef FUTURE_IMAGE_COLOR_PLACEHOLDER
+    *c = 0x4F00FF00; // ABGR
+#else
+    *c = 0x00000000; // ABGR
+#endif
+
+    dispatch();
+}
+
+void
+FutureImage::dispatch() const
+{
+    osg::observer_ptr<ImageLayer> layer_ptr(_layer);
+    TileKey key(_key);
+
+    Job job(JobArena::get(ARENA_ASYNC_LAYER));
+    job.setName(Stringify() << key.str() << " " << _layer->getName());
+
+    // prioritize higher LOD tiles.
+    job.setPriority(key.getLOD());
+
+    _result = job.dispatch<GeoImage>(
+        [layer_ptr, key](Cancelable* progress) mutable
+        {
+            GeoImage result;
+            osg::ref_ptr<ImageLayer> safe(layer_ptr);
+            if (safe.valid())
+            {
+                osg::ref_ptr<ProgressCallback> p = new ProgressCallback(progress);
+                result = safe->createImage(key, p.get());
+            }
+            return result;
+        });
+}
+
+bool
+FutureImage::requiresUpdateCall() const
+{
+    // careful - if we return false here, it may never get called again.
+
+    if (_resolved)
+    {
+        return osg::Image::requiresUpdateCall();
+    }
+
+    if (_result.isCanceled())
+    {
+        dispatch();
+    }
+
+    return true;
+}
+
+
+void
+FutureImage::update(osg::NodeVisitor* nv)
+{
+    if (_resolved)
+    {
+        return osg::Image::update(nv);
+    }
+
+    if (_result.isAvailable())
+    {
+        // fetch the result
+        GeoImage geoImage = _result.get();
+
+        if (geoImage.getStatus().isError())
+        {
+            OE_WARN << LC << "Error: " << geoImage.getStatus().message() << std::endl;
+        }
+
+        osg::ref_ptr<osg::Image> i = geoImage.takeImage();
+
+        if (i.valid())
+        {
+            this->setImage(
+                i->s(), i->t(), i->r(),
+                i->getInternalTextureFormat(), i->getPixelFormat(), i->getDataType(),
+                i->data(), i->getAllocationMode(),
+                i->getPacking(),
+                i->getRowLength());
+
+            // since we stole the data, make sure we don't double-delete it
+            i->setAllocationMode(osg::Image::NO_DELETE);
+
+            // trigger texture(s) that own this image to reapply
+            this->dirty();
+        }
+
+        else
+        {
+            _failed = true;
+
+            unsigned* c = (unsigned*)(data(0, 0));
+#ifdef FUTURE_IMAGE_COLOR_PLACEHOLDER
+            *c = 0x4f0000FF; // ABGR
+#else
+            *c = 0x00000000; // ABGR
+#endif
+            dirty();
+        }
+
+        // reset the future so update won't be called again
+        _result.abandon();
+
+        _resolved = true;
+    }
 }

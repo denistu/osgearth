@@ -24,7 +24,6 @@
 #include <osg/MatrixTransform>
 
 namespace osg {
-    class EllipsoidModel;
     class Light;
 }
 
@@ -99,14 +98,23 @@ namespace osgEarth { namespace SimpleSky
 
         osg::ref_ptr<PhongLightingEffect> _phong;
 
-        osg::ref_ptr<const osg::EllipsoidModel> _ellipsoidModel;
+        Ellipsoid _ellipsoid;
 
-		const SimpleSkyOptions _options;
+		SimpleSkyOptions _options;
+
+        bool _useBruneton;
+        bool _useONeil;
+        bool _usePBR;
+        bool _usePhong;
+
+        mutable Mutex _eb_mutex;
+        mutable osg::ref_ptr<osg::Drawable> _eb_drawable;
+        bool _eb_initialized;
 
         void construct();
 
         void makeSceneLighting();
-        void makeAtmosphere(const osg::EllipsoidModel*);
+        void makeAtmosphere(const Ellipsoid&);
         void makeSun();
         void makeMoon();
 
@@ -115,7 +123,6 @@ namespace osgEarth { namespace SimpleSky
         void getDefaultStars(std::vector<StarData>& out_stars);
         bool parseStarFile(const std::string& starFile, std::vector<StarData>& out_stars);
 
-        void setAmbientBrightness(float value);
         void setSunPosition(const osg::Vec3d& pos);
         void setMoonPosition(const osg::Vec3d& pos);
     };

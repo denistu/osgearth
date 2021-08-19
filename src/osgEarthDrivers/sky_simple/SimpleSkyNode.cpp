@@ -22,6 +22,7 @@
 
 #include "SimpleSkyNode"
 #include "SimpleSkyShaders"
+#include "BrunetonImpl"
 
 #include <osgEarth/StarData>
 #include <osgEarth/Ephemeris>
@@ -39,6 +40,7 @@
 #include <osgEarth/GLUtils>
 #include <osgEarth/Lighting>
 #include <osgEarth/PointDrawable>
+#include <osgEarth/TerrainEngineNode>
 
 #include <osg/MatrixTransform>
 #include <osg/ShapeDrawable>
@@ -78,11 +80,14 @@ using namespace osgEarth::SimpleSky;
 namespace
 {
     // constucts an ellipsoidal mesh that we will use to draw the atmosphere
-    osg::Geometry* s_makeEllipsoidGeometry(const osg::EllipsoidModel* ellipsoid, 
-                                           double                     outerRadius, 
-                                           bool                       genTexCoords)
+    osg::Geometry* s_makeEllipsoidGeometry(
+        const Ellipsoid& ellipsoid,
+        double outerRadius,
+        bool genTexCoords)
     {
-        double hae = outerRadius - ellipsoid->getRadiusEquator();
+        double hae = outerRadius - std::max(
+            ellipsoid.getRadiusEquator(),
+            ellipsoid.getRadiusPolar());
 
         osg::Geometry* geom = new osg::Geometry();
         geom->setUseVertexBufferObjects(true);
@@ -118,9 +123,8 @@ namespace
             for( int x = 0; x < lonSegments; ++x )
             {
                 double lon = -180.0 + segmentSize * (double)x;
-                double gx, gy, gz;
-                ellipsoid->convertLatLongHeightToXYZ( osg::DegreesToRadians(lat), osg::DegreesToRadians(lon), hae, gx, gy, gz );
-                verts->push_back( osg::Vec3(gx, gy, gz) );
+                osg::Vec3 g = ellipsoid.geodeticToGeocentric(osg::Vec3d(lon, lat, hae));
+                verts->push_back(g);
 
                 if (genTexCoords)
                 {
@@ -131,7 +135,7 @@ namespace
 
                 if (normals)
                 {
-                    osg::Vec3d normal(gx, gy, gz);
+                    osg::Vec3d normal(g);
                     normal.normalize();
                     normals->push_back( osg::Vec3f(normal) );
                 }
@@ -198,9 +202,13 @@ namespace
 
 SimpleSkyNode::SimpleSkyNode(const SimpleSkyOptions& options) :
 SkyNode ( options ),
-_options( options )
+_options( options ),
+_eb_initialized(false)
 {
     construct();
+
+    // temp -- for the EB stateset
+    ADJUST_UPDATE_TRAV_COUNT(this, +1);
 }
 
 void
@@ -208,6 +216,10 @@ SimpleSkyNode::construct()
 {
     // protect us from the ShaderGenerator.
     ShaderGenerator::setIgnoreHint(this, true);
+
+    // containers for sky elements. DO NOT add children directly to 
+    // the skynode; uswe the cullContainer instead!
+    _cullContainer = new osg::Group();
 
     osg::Vec3f lightPos(0.0f, 1.0f, 0.0f);
 
@@ -221,7 +233,7 @@ SimpleSkyNode::construct()
     osg::LightSource* lightSource = new osg::LightSource();
     lightSource->setLight(_light.get());
     lightSource->setCullingActive(false);
-    this->addChild( lightSource );
+    _cullContainer->addChild( lightSource );
     lightSource->addCullCallback(new LightSourceGL3UniformGenerator());
 
     if ( _options.ambient().isSet() )
@@ -236,20 +248,49 @@ SimpleSkyNode::construct()
         OE_WARN << LC << "Found an ephemeris reference point, but SimpleSky does not support projected maps" << std::endl;
         return;
     }
-
-    // containers for sky elements.
-    _cullContainer = new osg::Group();
     
     // set up the astronomical parameters:
     osg::ref_ptr<const SpatialReference> wgs84 = SpatialReference::get("wgs84");
-    _ellipsoidModel = wgs84->getEllipsoid();
-    _innerRadius = osg::minimum(
-        _ellipsoidModel->getRadiusPolar(),
-        _ellipsoidModel->getRadiusEquator() );
-    _outerRadius = _innerRadius * 1.025f;
+    _ellipsoid = wgs84->getEllipsoid();
+    _innerRadius = std::min(
+        _ellipsoid.getRadiusPolar(),
+        _ellipsoid.getRadiusEquator() );
+
+    _outerRadius = _innerRadius * 1.025; // +60000.0;
 
     CelestialBody sun = getEphemeris()->getSunPosition(DateTime());
     _sunDistance = sun.altitude.as(Units::METERS);
+
+    // parse the quality setting:
+    _usePhong = false;
+    _useONeil = false;
+    _usePBR = false;
+    _useBruneton = false;
+
+    switch (_options.quality().get())
+    {
+    case SkyOptions::QUALITY_HIGH:
+    case SkyOptions::QUALITY_BEST:
+        _useBruneton = true;
+        _usePBR = true;
+        break;
+    case SkyOptions::QUALITY_MEDIUM:
+    case SkyOptions::QUALITY_DEFAULT:
+        _useONeil = true;
+        _usePBR = true;
+        break;
+    case SkyOptions::QUALITY_LOW:
+    default:
+        _usePhong = true;
+        break;
+    }
+
+    if (_useBruneton && Registry::capabilities().getGLSLVersion() < 4.30f)
+    {
+        OE_WARN << LC << "Bruneton lighting requires GL 4.3+, falling back on O'Neil" << std::endl;
+        _useBruneton = false;
+        _useONeil = true;
+    }
     
     if ( Registry::capabilities().supportsGLSL() )
     {
@@ -265,7 +306,7 @@ SimpleSkyNode::construct()
         makeSceneLighting();
 
         // make the sky elements (don't change the order here)
-        makeAtmosphere( _ellipsoidModel.get() );
+        makeAtmosphere(_ellipsoid);
 
         makeSun();
 
@@ -294,7 +335,22 @@ void
 SimpleSkyNode::traverse( osg::NodeVisitor& nv ) 
 { 
     if ( nv.getVisitorType() == nv.CULL_VISITOR && _cullContainer.valid() ) 
-    { 
+    {
+        // Generate LUTs on the first pass
+        if (_useBruneton && !_eb_drawable.valid())
+        {
+            ScopedMutexLock lock(_eb_mutex);
+            if (!_eb_drawable.valid())
+            {
+                _eb_drawable = new Bruneton::ComputeDrawable(
+                    _innerRadius,
+                    _outerRadius,
+                    _options.quality() == SkyOptions::QUALITY_BEST);
+
+                _eb_drawable->accept(nv);
+            }
+        }
+
         osgUtil::CullVisitor* cv = Culling::asCullVisitor(nv); 
 
         bool needToRestoreInheritanceMask =
@@ -305,7 +361,7 @@ SimpleSkyNode::traverse( osg::NodeVisitor& nv )
         osg::ref_ptr<osg::CullSettings::ClampProjectionMatrixCallback> cb = 
             cv->getClampProjectionMatrixCallback(); 
 
-        cv->setClampProjectionMatrixCallback( 0L ); 
+        cv->setClampProjectionMatrixCallback(nullptr); 
 
         _cullContainer->accept( nv ); 
 
@@ -321,6 +377,42 @@ SimpleSkyNode::traverse( osg::NodeVisitor& nv )
                 cv->getInheritanceMask() | osg::CullSettings::CLAMP_PROJECTION_MATRIX_CALLBACK); 
         } 
     } 
+
+    else if (nv.getVisitorType() == nv.UPDATE_VISITOR)
+    {
+        // If the Bruneton compute shaders are finished, set up the rendering statesets.
+        if (_useBruneton &&
+            !_eb_initialized &&
+            _eb_drawable.valid())
+        {
+            auto eb = static_cast<Bruneton::ComputeDrawable*>(_eb_drawable.get());
+            if (eb->isReady())
+            {
+                TerrainEngineNode* terrain = osgEarth::findTopMostNodeOfType<TerrainEngineNode>(this);
+                if (terrain)
+                {
+                    osg::StateSet* groundStateSet =
+                        _options.atmosphericLighting() == true ?
+                        getOrCreateStateSet() : nullptr;
+
+                    bool ok = eb->populateRenderingStateSets(
+                        groundStateSet,
+                        _atmosphere->getOrCreateStateSet(),
+                        terrain->getResources());
+
+                    _eb_initialized = true;
+
+                    if (!ok)
+                    {
+                        OE_WARN << LC << "Bruneton lighting failed to initialize" << std::endl;
+                        _eb_drawable = nullptr;
+                    }
+                }
+
+                ADJUST_UPDATE_TRAV_COUNT(this, -1);
+            }
+        }
+    }
 
     SkyNode::traverse( nv ); 
 }
@@ -351,24 +443,21 @@ SimpleSkyNode::onSetEphemeris()
 void
 SimpleSkyNode::onSetDateTime()
 {
-    if ( _ellipsoidModel.valid() )
-    {
-        osg::View* view = 0L;
-        const DateTime& dt = getDateTime();
+    osg::View* view = 0L;
+    const DateTime& dt = getDateTime();
 
-        CelestialBody sun = getEphemeris()->getSunPosition(dt);
-        setSunPosition( sun.geocentric );
+    CelestialBody sun = getEphemeris()->getSunPosition(dt);
+    setSunPosition( sun.geocentric );
 
-        CelestialBody moon = getEphemeris()->getMoonPosition(dt);
-        setMoonPosition( moon.geocentric );
+    CelestialBody moon = getEphemeris()->getMoonPosition(dt);
+    setMoonPosition( moon.geocentric );
 
-        // position the stars:
-        double time_r = dt.hours()/24.0; // 0..1
-        double rot_z = -osg::PI + TWO_PI*time_r;
+    // position the stars:
+    double time_r = dt.hours()/24.0; // 0..1
+    double rot_z = -osg::PI + TWO_PI*time_r;
 
-        if ( _starsXform.valid() )
-            _starsXform->setMatrix( osg::Matrixd::rotate(-rot_z, 0, 0, 1) );
-    }
+    if ( _starsXform.valid() )
+        _starsXform->setMatrix( osg::Matrixd::rotate(-rot_z, 0, 0, 1) );
 }
 
 void
@@ -472,74 +561,64 @@ SimpleSkyNode::makeSceneLighting()
     VirtualProgram* vp = VirtualProgram::getOrCreate( stateset );
     vp->setName( "SimpleSky Scene Lighting" );
 
+    stateset->getOrCreateUniform("atmos_fInnerRadius", osg::Uniform::FLOAT)->set(_innerRadius);
+    stateset->getOrCreateUniform("atmos_fOuterRadius", osg::Uniform::FLOAT)->set(_outerRadius);
+
     if (_options.atmosphericLighting() == true)
     {
         Shaders pkg;
-        pkg.load( vp, pkg.Ground_ONeil_Vert );
 
-        if (_options.usePBR() == true)
-            pkg.load(vp, pkg.Ground_PBR_Frag);
-        else
-            pkg.load( vp, pkg.Ground_ONeil_Frag );
+        if (_useBruneton)
+        {
+            if (_options.quality() == SkyOptions::QUALITY_HIGH)
+                OE_INFO << LC << "Using Bruneton per-vertex lighting" << std::endl;
+            else
+                OE_INFO << LC << "Using Bruneton per-fragment lighting" << std::endl;
+            // nothing to do here since we have to run precomputation first
 
-        OE_INFO << LC << "Using O'Neil atmospheric lighting\n";
+            //TODO: api
+            stateset->getOrCreateUniform("atmos_haze_cutoff", osg::Uniform::FLOAT)->set(0.0f);
+            stateset->getOrCreateUniform("atmos_haze_strength", osg::Uniform::FLOAT)->set(1.0f);
+        }
+        else if (_useONeil)
+        {
+            pkg.load(vp, pkg.Ground_ONeil_Vert);
+            OE_INFO << LC << "Using O'Neil lighting" << std::endl;
+            pkg.load(vp, pkg.Ground_ONeil_Frag);
+            stateset->getOrCreateUniform("oe_sky_ambientBoostFactor", osg::Uniform::FLOAT)->set(_options.daytimeAmbientBoost().get());
+        }
     }
 
     else
     {
         _phong = new PhongLightingEffect();
         _phong->attach( stateset );
-        OE_INFO << LC << "Using Phong lighting\n";
+        OE_INFO << LC << "Using Phong lighting" << std::endl;
     }
 
-    // calculate and apply the uniforms:
-    // TODO: perhaps we can just hard-code most of these as GLSL consts.
-    float r_wl = ::powf( .65f, 4.0f );
-    float g_wl = ::powf( .57f, 4.0f );
-    float b_wl = ::powf( .475f, 4.0f );
-    osg::Vec3 RGB_wl( 1.0f/r_wl, 1.0f/g_wl, 1.0f/b_wl );
-    float Kr = 0.0025f;
-    float Kr4PI = Kr * 4.0f * osg::PI;
-    float Km = 0.0015f;
-    float Km4PI = Km * 4.0f * osg::PI;
-    float ESun = 15.0f;
-    float MPhase = -.095f;
-    float RayleighScaleDepth = 0.25f;
-    int   Samples = 2;
-    float Weather = 1.0f;
-
-    float Scale = 1.0f / (_outerRadius - _innerRadius);
-
-    //TODO: make all these constants. -gw
-    stateset->getOrCreateUniform( "atmos_v3InvWavelength", osg::Uniform::FLOAT_VEC3 )->set( RGB_wl );
-    stateset->getOrCreateUniform( "atmos_fInnerRadius",    osg::Uniform::FLOAT )->set( _innerRadius );
-    stateset->getOrCreateUniform( "atmos_fInnerRadius2",   osg::Uniform::FLOAT )->set( _innerRadius * _innerRadius );
-    stateset->getOrCreateUniform( "atmos_fOuterRadius",    osg::Uniform::FLOAT )->set( _outerRadius );
-    stateset->getOrCreateUniform( "atmos_fOuterRadius2",   osg::Uniform::FLOAT )->set( _outerRadius * _outerRadius );
-    stateset->getOrCreateUniform( "atmos_fKrESun",         osg::Uniform::FLOAT )->set( Kr * ESun );
-    stateset->getOrCreateUniform( "atmos_fKmESun",         osg::Uniform::FLOAT )->set( Km * ESun );
-    stateset->getOrCreateUniform( "atmos_fKr4PI",          osg::Uniform::FLOAT )->set( Kr4PI );
-    stateset->getOrCreateUniform( "atmos_fKm4PI",          osg::Uniform::FLOAT )->set( Km4PI );
-    stateset->getOrCreateUniform( "atmos_fScale",          osg::Uniform::FLOAT )->set( Scale );
-    stateset->getOrCreateUniform( "atmos_fScaleDepth",     osg::Uniform::FLOAT )->set( RayleighScaleDepth );
-    stateset->getOrCreateUniform( "atmos_fScaleOverScaleDepth", osg::Uniform::FLOAT )->set( Scale / RayleighScaleDepth );
-    stateset->getOrCreateUniform( "atmos_g",               osg::Uniform::FLOAT )->set( MPhase );
-    stateset->getOrCreateUniform( "atmos_g2",              osg::Uniform::FLOAT )->set( MPhase * MPhase );
-    stateset->getOrCreateUniform( "atmos_nSamples",        osg::Uniform::INT )->set( Samples );
-    stateset->getOrCreateUniform( "atmos_fSamples",        osg::Uniform::FLOAT )->set( (float)Samples );
-    stateset->getOrCreateUniform( "atmos_fWeather",        osg::Uniform::FLOAT )->set( Weather );
-
-    // options:
-    stateset->getOrCreateUniform("oe_sky_exposure",           osg::Uniform::FLOAT )->set( _options.exposure().value() );
-    stateset->getOrCreateUniform("oe_sky_ambientBoostFactor", osg::Uniform::FLOAT)->set(_options.daytimeAmbientBoost().get());
+    stateset->getOrCreateUniform("oe_sky_exposure", osg::Uniform::FLOAT)->set(
+        _options.exposure().value());
 }
 
 void
-SimpleSkyNode::makeAtmosphere(const osg::EllipsoidModel* em)
+SimpleSkyNode::makeAtmosphere(const Ellipsoid& em)
 {
     // create some skeleton geometry to shade:
+#if 1
     osg::Geometry* drawable = s_makeEllipsoidGeometry( em, _outerRadius, false );
-
+    drawable->setName("Atmosphere Drawable");
+#else
+    // TEST!
+    osg::Geometry* drawable = new osg::Geometry();
+    drawable->setCullingActive(false);
+    drawable->setName("Atmosphere Drawable");
+    drawable->setUseVertexBufferObjects(true);
+    osg::Vec3Array* verts = new osg::Vec3Array(osg::Array::BIND_PER_VERTEX, 4);
+    drawable->setVertexArray(verts);
+    const unsigned short elements[6] = { 0,2,1,2,0,3 };
+    drawable->addPrimitiveSet(new osg::DrawElementsUShort(GL_TRIANGLES, 6, elements));
+#endif
+    
     // disable wireframe/point rendering on the atmosphere, since it is distracting.
     if ( _options.allowWireframe() == false )
     {
@@ -547,52 +626,48 @@ SimpleSkyNode::makeAtmosphere(const osg::EllipsoidModel* em)
             new osg::PolygonMode(osg::PolygonMode::FRONT_AND_BACK, osg::PolygonMode::FILL),
             osg::StateAttribute::PROTECTED);
     }
-
-    osg::Geode* geode = new osg::Geode();
-    geode->addDrawable( drawable );
     
     // configure the state set:
     osg::StateSet* atmosSet = drawable->getOrCreateStateSet();
     GLUtils::setLighting(atmosSet, osg::StateAttribute::OFF);
-    atmosSet->setAttributeAndModes( new osg::CullFace(osg::CullFace::FRONT), osg::StateAttribute::ON );
+    atmosSet->setAttributeAndModes( new osg::CullFace(osg::CullFace::FRONT), osg::StateAttribute::ON | osg::StateAttribute::PROTECTED);
     atmosSet->setAttributeAndModes( new osg::Depth( osg::Depth::LESS, 0, 1, false ) ); // no depth write
     atmosSet->setAttributeAndModes( new osg::Depth(osg::Depth::ALWAYS, 0, 1, false) ); // no zbuffer
     atmosSet->setAttributeAndModes( new osg::BlendFunc( GL_ONE, GL_ONE ), osg::StateAttribute::ON );
 
     // first install the atmosphere rendering shaders.
-    if ( Registry::capabilities().supportsGLSL() )
-    {
-        VirtualProgram* vp = VirtualProgram::getOrCreate( atmosSet );
-        vp->setName( "SimpleSky Atmosphere" );
-        vp->setInheritShaders( false );
+    VirtualProgram* vp = VirtualProgram::getOrCreate(atmosSet);
+    vp->setName("SimpleSky Atmosphere");
+    vp->setInheritShaders(false);
 
+    if (!_useBruneton)
+    {
         Shaders pkg;
-        pkg.load( vp, pkg.Atmosphere_Vert );
-        pkg.load( vp, pkg.Atmosphere_Frag );
+        pkg.load(vp, pkg.Atmosphere_Vert);
+        pkg.load(vp, pkg.Atmosphere_Frag);
     }
 
     // A nested camera isolates the projection matrix calculations so the node won't 
     // affect the clip planes in the rest of the scene.
     osg::Camera* cam = new osg::Camera();
+    cam->setName("Atmosphere Cam");
     cam->getOrCreateStateSet()->setRenderBinDetails( BIN_ATMOSPHERE, "RenderBin" );
     cam->setRenderOrder( osg::Camera::NESTED_RENDER );
     cam->setComputeNearFarMode( osg::CullSettings::COMPUTE_NEAR_FAR_USING_BOUNDING_VOLUMES );
-    cam->addChild( geode );
+    cam->addChild(drawable);
 
-    _atmosphere = cam;
+    _cullContainer->addChild(cam);
 
-    _cullContainer->addChild( _atmosphere.get() );
+    _atmosphere = drawable;
 }
 
 void
 SimpleSkyNode::makeSun()
 {
     osg::Billboard* sun = new osg::Billboard();
+    sun->setName("Sun billboard");
     sun->setMode( osg::Billboard::POINT_ROT_EYE );
     sun->setNormal( osg::Vec3(0, 0, 1) );
-
-    //float sunRadius = _innerRadius * 100.0f;
-    //sun->addDrawable( s_makeDiscGeometry( sunRadius*80.0f ) ); 
 
     const double zoomFactor = 80.0; // to account for the solare glare
     const double sunRadius = 695508000.0; // radius of the run in meters
@@ -623,6 +698,7 @@ SimpleSkyNode::makeSun()
     // A nested camera isolates the projection matrix calculations so the node won't 
     // affect the clip planes in the rest of the scene.
     osg::Camera* cam = new osg::Camera();
+    cam->setName("Sun cam");
     cam->getOrCreateStateSet()->setRenderBinDetails( BIN_SUN, "RenderBin" );
     cam->setRenderOrder( osg::Camera::NESTED_RENDER );
     cam->setComputeNearFarMode( osg::CullSettings::COMPUTE_NEAR_FAR_USING_BOUNDING_VOLUMES );
@@ -632,6 +708,7 @@ SimpleSkyNode::makeSun()
 
     // make the sun's transform:
     _sunXform = new osg::MatrixTransform();
+    _sunXform->setName("Sun xform");
     _sunXform->setMatrix( osg::Matrix::translate( 
         _sunDistance * _light->getPosition().x(),
         _sunDistance * _light->getPosition().y(),
@@ -644,9 +721,10 @@ SimpleSkyNode::makeSun()
 void
 SimpleSkyNode::makeMoon()
 {
-    osg::ref_ptr< osg::EllipsoidModel > em = new osg::EllipsoidModel( 1738140.0, 1735970.0 );   
+    Ellipsoid em(1738140.0, 1735970.0);
     
-    osg::Geometry* moonDrawable = s_makeEllipsoidGeometry( em.get(), em->getRadiusEquator()*_options.moonScale().get(), true );    
+    osg::Geometry* moonDrawable = s_makeEllipsoidGeometry( em, em.getRadiusEquator()*_options.moonScale().get(), true );
+    moonDrawable->setName("Moon drawable");
     osg::StateSet* stateSet = moonDrawable->getOrCreateStateSet();
 
     osg::ref_ptr<osg::Image> image = _options.moonImageURI()->getImage();
@@ -655,39 +733,39 @@ SimpleSkyNode::makeMoon()
         OE_WARN << LC << "Failed to load moon texture from " << _options.moonImageURI()->full() << std::endl;
     }
 
-    osg::Texture2D* texture = new osg::Texture2D( image.get() );
-    texture->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR);
-    texture->setFilter(osg::Texture::MAG_FILTER,osg::Texture::LINEAR);
-    texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
-    texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
-    texture->setResizeNonPowerOfTwoHint(false);
-    texture->setUnRefImageDataAfterApply(true);
-    stateSet->setTextureAttributeAndModes( 0, texture, osg::StateAttribute::ON | osg::StateAttribute::PROTECTED);
-#ifdef OSG_GL3_AVAILABLE
-    // Adjust for loss of GL_LUMINANCE in glTexture2D's format parameter.  OSG handles the texture's internal format,
-    // but the format parameter comes from the image's pixel format field.
-    if (image.valid() && image->getPixelFormat() == GL_LUMINANCE)
+    if (image.valid())
     {
-      image->setPixelFormat(GL_RED);
-      // Swizzle the RGB all to RED in order to match previous GL_LUMINANCE behavior
-      texture->setSwizzle(osg::Vec4i(GL_RED, GL_RED, GL_RED, GL_ONE));
-    }
+        osg::Texture2D* texture = new osg::Texture2D(image.get());
+        texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+        texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
+        texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+        texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+        texture->setResizeNonPowerOfTwoHint(false);
+        texture->setUnRefImageDataAfterApply(false);
+        stateSet->setTextureAttributeAndModes(0, texture, osg::StateAttribute::ON | osg::StateAttribute::PROTECTED);
+        stateSet->addUniform(new osg::Uniform("moonTex", 0));
+
+#ifdef OSG_GL3_AVAILABLE
+        // Adjust for loss of GL_LUMINANCE in glTexture2D's format parameter.  OSG handles the texture's internal format,
+        // but the format parameter comes from the image's pixel format field.
+        if (image.valid() && image->getPixelFormat() == GL_LUMINANCE)
+        {
+            image->setPixelFormat(GL_RED);
+            // Swizzle the RGB all to RED in order to match previous GL_LUMINANCE behavior
+            texture->setSwizzle(osg::Vec4i(GL_RED, GL_RED, GL_RED, GL_ONE));
+        }
 #endif
+    }
 
     osg::Vec4Array* colors = new osg::Vec4Array(osg::Array::BIND_OVERALL, 1);    
     moonDrawable->setColorArray( colors );
-    (*colors)[0] = osg::Vec4(1, 1, 1, 1 );
-
-    // configure the stateset
-    //GLUtils::setLighting(stateSet, osg::StateAttribute::ON );
+    (*colors)[0] = osg::Vec4(1, 1, 1, 1);
 
     stateSet->setAttributeAndModes( new osg::CullFace( osg::CullFace::BACK ), osg::StateAttribute::ON);
     stateSet->setRenderBinDetails( BIN_MOON, "RenderBin" );
     stateSet->setAttributeAndModes( new osg::Depth(osg::Depth::ALWAYS, 0, 1, false), osg::StateAttribute::ON );
     stateSet->setAttributeAndModes( new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), osg::StateAttribute::ON );
     
-#if 1
-    stateSet->addUniform(new osg::Uniform("moonTex", 0));
 
     // create shaders
     Shaders pkg;
@@ -702,61 +780,10 @@ SimpleSkyNode::makeMoon()
     program->addShader( fs );
     stateSet->setAttributeAndModes( program, osg::StateAttribute::ON | osg::StateAttribute::PROTECTED );
 
-#else
-
-    VirtualProgram* vp = VirtualProgram::getOrCreate(stateSet);
-
-    const char* VS =
-        "#version 330\n"
-        "#pragma import_defines(OE_NUM_LIGHTS) \n"
-        "out vec2 oe_SimpleSky_moonTexCoord;\n"
-        "out float oe_SimpleSky_lighting;\n"
-        "struct osg_LightSourceParameters  \n"
-        "{    \n"
-           "vec4 ambient;              // Aclarri    \n"
-           "vec4 diffuse;              // Dcli    \n"
-           "vec4 specular;             // Scli    \n"
-           "vec4 position;             // Ppli    \n"
-           "//vec4 halfVector;           // Derived: Hi    \n"
-           "vec3 spotDirection;        // Sdli    \n"
-           "float spotExponent;        // Srli    \n"
-           "float spotCutoff;          // Crli                               \n"
-                                      "// (range: [0.0,90.0], 180.0)    \n"
-           "float spotCosCutoff;       // Derived: cos(Crli)                  \n"
-                                      "// (range: [1.0,0.0],-1.0)    \n"
-           "float constantAttenuation; // K0    \n"
-           "float linearAttenuation;   // K1    \n"
-           "float quadraticAttenuation;// K2   \n"
-
-           "bool enabled; \n"
-        "};   \n"
-        "uniform osg_LightSourceParameters osg_LightSource[OE_NUM_LIGHTS]; \n"
-        "void oe_SimpleSky_moonVS(inout vec4 vertexModel) { \n"
-        "    oe_SimpleSky_moonTexCoord = gl_MultiTexCoord0.st; \n"
-        "    oe_SimpleSky_lighting = 1.0; \n"
-        "} \n";
-
-    const char* FS =
-        "#version 330\n"
-        "in vec2 oe_SimpleSky_moonTexCoord;\n"
-        "in float oe_SimpleSky_lighting;\n"
-        "uniform sampler2D oe_SimpleSky_moonTex; \n"
-        "void oe_SimpleSky_moonFS(inout vec4 color) { \n"
-        "    color = texture(oe_SimpleSky_moonTex, oe_SimpleSky_moonTexCoord); \n"
-        "    color.rgb *= oe_SimpleSky_lighting; \n"
-        "} \n";
-
-
-    vp->setFunction("oe_SimpleSky_moonVS", VS, ShaderComp::LOCATION_VERTEX_MODEL);
-    vp->setFunction("oe_SimpleSky_moonFS", FS, ShaderComp::LOCATION_FRAGMENT_COLORING);
-
-    stateSet->addUniform(new osg::Uniform("oe_SimpleSky_moonTex", 0));
-
-#endif
-
     // A nested camera isolates the projection matrix calculations so the node won't 
     // affect the clip planes in the rest of the scene.
     osg::Camera* cam = new osg::Camera();
+    cam->setName("Moon cam");
     cam->getOrCreateStateSet()->setRenderBinDetails( BIN_MOON, "RenderBin" );
     cam->setRenderOrder( osg::Camera::NESTED_RENDER );
     cam->setComputeNearFarMode( osg::CullSettings::COMPUTE_NEAR_FAR_USING_BOUNDING_VOLUMES );
@@ -767,7 +794,8 @@ SimpleSkyNode::makeMoon()
     // make the moon's transform:
     CelestialBody moon = getEphemeris()->getMoonPosition(getDateTime());
 
-    _moonXform = new osg::MatrixTransform();   
+    _moonXform = new osg::MatrixTransform();
+    _moonXform->setName("Moon xform");
     _moonXform->setMatrix( osg::Matrix::translate( moon.geocentric ) ); 
     _moonXform->addChild( _moon.get() );
 
@@ -828,9 +856,11 @@ SimpleSkyNode::makeStars()
     }
 
     _stars = buildStarGeometry(stars);
+    _stars->setName("Stars drawable");
 
     // make the stars' transform:
     _starsXform = new osg::MatrixTransform();
+    _starsXform->setName("Stars xform");
     _starsXform->addChild( _stars.get() );
 
     _cullContainer->addChild( _starsXform.get() );
@@ -886,6 +916,7 @@ SimpleSkyNode::buildStarGeometry(const std::vector<StarData>& stars)
 
     // A separate camera isolates the projection matrix calculations.
     osg::Camera* cam = new osg::Camera();
+    cam->setName("Stars cam");
     cam->getOrCreateStateSet()->setRenderBinDetails( BIN_STARS, "RenderBin" );
     cam->setRenderOrder( osg::Camera::NESTED_RENDER );
 

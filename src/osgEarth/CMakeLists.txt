@@ -56,7 +56,6 @@ SET(LIB_NAME osgEarth)
 
 set(TARGET_GLSL
     CascadeDraping.glsl
-    ClipPlane.glsl
     DepthOffset.glsl
     Draping.glsl
     DrawInstancedAttribute.glsl
@@ -133,6 +132,7 @@ SET(LIB_PUBLIC_HEADERS
     ElevationPool
     ElevationRanges
     ElevationQuery
+    Ellipsoid
     EllipsoidIntersector
     Endian
     Export
@@ -195,6 +195,7 @@ SET(LIB_PUBLIC_HEADERS
     NodeUtils
     Notify
     optional
+    ObjectIDPicker
     ObjectIndex
     OverlayDecorator
     PagedNode
@@ -455,9 +456,8 @@ SET(LIB_PUBLIC_HEADERS
 )
 
 if(OSGEARTH_ENABLE_IMGUI)
-    set(LIB_PUBLIC_HEADERS ${LIB_PUBLIC_HEADERS}
+    set(LIB_PUBLIC_HEADERS_IMGUI
         ImGui/ImGui
-        ImGui/OsgImGuiHandler
         ImGui/LayersGUI
         ImGui/NetworkMonitorGUI
         ImGui/NotifyGUI
@@ -467,8 +467,11 @@ if(OSGEARTH_ENABLE_IMGUI)
         ImGui/ViewpointsGUI
         ImGui/SystemGUI
         ImGui/EphemerisGUI
+        ImGui/ShaderGUI
         ImGui/TerrainGUI
-        ImGui/TerrainEditGUI)
+        ImGui/TerrainEditGUI
+        ImGui/CameraGUI
+        )
 endif()
 
 
@@ -553,6 +556,7 @@ set(TARGET_SRC
     ElevationPool.cpp
     ElevationRanges.cpp
     ElevationQuery.cpp
+    Ellipsoid.cpp
     EllipsoidIntersector.cpp
     Extension.cpp
     FadeEffect.cpp
@@ -586,7 +590,6 @@ set(TARGET_SRC
     LayerShader.cpp
     Lighting.cpp
     LineDrawable.cpp
-    Locators.cpp
     LocalTangentPlane.cpp
     Math.cpp
     Map.cpp
@@ -605,6 +608,7 @@ set(TARGET_SRC
     NetworkMonitor.cpp
     NodeUtils.cpp
     Notify.cpp
+    ObjectIDPicker.cpp
     ObjectIndex.cpp
     OverlayDecorator.cpp
     PagedNode.cpp
@@ -858,6 +862,7 @@ message(STATUS "Building ${LIB_NAME} as a ${OSGEARTH_DYNAMIC_OR_STATIC} library"
 ADD_LIBRARY(${LIB_NAME}
     ${OSGEARTH_DYNAMIC_OR_STATIC}
     ${LIB_PUBLIC_HEADERS}
+    ${LIB_PUBLIC_HEADERS_IMGUI}
     ${TINYXML_SRC}
     ${VERSION_GIT_SOURCE}
     ${TARGET_SRC}
@@ -934,3 +939,14 @@ LINK_CORELIB_DEFAULT(${LIB_NAME} ${CMAKE_THREAD_LIBS_INIT} ${MATH_LIBRARY})
 
 
 INCLUDE(ModuleInstall OPTIONAL)
+
+if(OSGEARTH_ENABLE_IMGUI)
+    # custom install for ImGui stuff
+    if(NOT USE_CUSTOM_SOURCE_GROUPS)
+        source_group("Headers\\ImGui" FILES ${LIB_PUBLIC_HEADERS_IMGUI})
+    endif()
+
+    install(
+        FILES ${LIB_PUBLIC_HEADERS_IMGUI} ImGui/ImGui.cpp
+        DESTINATION ${INSTALL_INCDIR}/ImGui)
+endif()

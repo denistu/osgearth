@@ -161,7 +161,7 @@ HorizonTileCuller::set(const SpatialReference* srs,
 
     if (_horizon.valid())
     {
-        _horizon->setEllipsoid(*srs->getEllipsoid());
+        _horizon->setEllipsoid(srs->getEllipsoid());
 
         // Adjust the horizon ellipsoid based on the minimum Z value of the tile;
         // necessary because a tile that's below the ellipsoid (ocean floor, e.g.)
@@ -169,9 +169,9 @@ HorizonTileCuller::set(const SpatialReference* srs,
         // cases we need a more conservative ellipsoid.
         double zMin = static_cast<double>(osg::minimum( bbox.corner(0).z(), static_cast<osg::BoundingBox::value_type>(0.)));
         zMin = osg::maximum(zMin, -25000.0); // approx the lowest point on earth * 2
-        _horizon->setEllipsoid( osg::EllipsoidModel(
-            srs->getEllipsoid()->getRadiusEquator() + zMin, 
-            srs->getEllipsoid()->getRadiusPolar() + zMin) );
+        _horizon->setEllipsoid( Ellipsoid(
+            srs->getEllipsoid().getRadiusEquator() + zMin, 
+            srs->getEllipsoid().getRadiusPolar() + zMin) );
 
         // consider the uppermost 4 points of the tile-aligned bounding box.
         // (the last four corners of the bbox are the "zmax" corners.)
@@ -250,7 +250,7 @@ SurfaceNode::getPixelSizeOnScreen(osg::CullStack* cull) const
 void
 SurfaceNode::setLastFramePassedCull(unsigned fn)
 {
-    _lastFramePassedCull.exchange(fn);
+    _lastFramePassedCull = fn;
 }
 
 void
@@ -353,18 +353,6 @@ SurfaceNode::setElevationRaster(const osg::Image*   raster,
     dirtyBound();
 }
 
-const osg::Image*
-SurfaceNode::getElevationRaster() const
-{
-    return _drawable->getElevationRaster();
-}
-
-const osg::Matrixf&
-SurfaceNode::getElevationMatrix() const
-{
-    return _drawable->getElevationMatrix();
-};
-
 void
 SurfaceNode::addDebugNode(const osg::BoundingBox& box)
 {
@@ -391,10 +379,4 @@ SurfaceNode::setDebugText(const std::string& strText)
         return;
     }
     _debugText->setText(strText);
-}
-
-const osg::BoundingBox&
-SurfaceNode::getAlignedBoundingBox() const
-{
-    return _drawable->getBoundingBox();
 }

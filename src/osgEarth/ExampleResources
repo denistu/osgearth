@@ -276,7 +276,7 @@ namespace osgEarth { namespace Util
 
         //! Accesses the router on the given view, creating one if necessary
         static EventRouter& get(osgViewer::View* v) {
-            OE_HARD_ASSERT(v != nullptr, __func__);
+            OE_HARD_ASSERT(v != nullptr);
             for (auto& eh : v->getEventHandlers()) {
                 EventRouter* r = dynamic_cast<EventRouter*>(eh.get());
                 if (r)
@@ -285,6 +285,9 @@ namespace osgEarth { namespace Util
             EventRouter* r = new EventRouter();
             v->getEventHandlers().push_front(r);
             return *r;
+        }
+        static EventRouter& get(osg::ref_ptr<osgViewer::View>& v) {
+            return get(v.get());
         }
 
         struct Push {

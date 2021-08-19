@@ -24,6 +24,35 @@ using namespace osgEarth::Procedural;
 #undef LC
 #define LC "[Biome] "
 
+namespace
+{
+    static std::string asset_group_names[2] = {
+        "trees",
+        "undergrowth"
+    };
+}
+
+
+AssetGroup::Type
+AssetGroup::type(const std::string& name)
+{
+    if (name == asset_group_names[TREES])
+        return TREES;
+    else if (name == asset_group_names[UNDERGROWTH])
+        return UNDERGROWTH;
+    else
+        return UNDEFINED;
+}
+
+std::string
+AssetGroup::name(AssetGroup::Type group)
+{
+
+    return group < NUM_ASSET_GROUPS ?
+        asset_group_names[group] :
+        std::string("undefined");
+}
+
 
 ModelAsset::ModelAsset(const Config& conf)
 {
@@ -34,8 +63,6 @@ ModelAsset::ModelAsset(const Config& conf)
     conf.get("width", width());
     conf.get("height", height());
     conf.get("size_variation", sizeVariation());
-    conf.get("selection_weight", selectionWeight());
-    //conf.get("fill", fill());
 
     // save the original so the user can extract user-defined values
     _sourceConfig = conf;
@@ -52,8 +79,6 @@ ModelAsset::getConfig() const
     conf.set("width", width());
     conf.set("height", height());
     conf.set("size_variation", sizeVariation());
-    conf.set("selection_weight", selectionWeight());
-    //conf.set("fill", fill());
     return conf;
 }
 
@@ -84,6 +109,9 @@ LifeMapTextureAsset::getConfig() const
 
 AssetCatalog::AssetCatalog(const Config& conf)
 {
+    _lifemapMatrixWidth = as<unsigned>(conf.child("lifemaptextures").value("width"), 1);
+    _lifemapMatrixHeight = as<unsigned>(conf.child("lifemaptextures").value("height"), 1);
+
     ConfigSet texturesConf = conf.child("lifemaptextures").children("texture");
     for (const auto& c : texturesConf)
     {
@@ -95,11 +123,21 @@ AssetCatalog::AssetCatalog(const Config& conf)
         _specialTextures.emplace_back(c);
     }
 
-    ConfigSet modelsConf = conf.child("models").children("model");
-    for (const auto& c : modelsConf)
+    ConfigSet modelassetgroups = conf.child("modelassets").children("group");
+    for (const auto& c : modelassetgroups)
     {
-        ModelAsset asset(c);
-        _models[asset.name().get()] = asset;
+        AssetGroup::Type group = AssetGroup::type(c.value("name"));
+
+        if (group < NUM_ASSET_GROUPS)
+        {
+            ConfigSet modelassets = c.children("asset");
+            for (const auto& m : modelassets)
+            {
+                ModelAsset asset(m);
+                asset._group = group;
+                _models[asset.name().get()] = asset;
+            }
+        }
     }
 }
 
@@ -107,6 +145,8 @@ Config
 AssetCatalog::getConfig() const
 {
     Config conf("AssetCatalog");
+
+    //TODO - incomplete/wrong
 
     Config textures("LifeMapTextures");
     for (auto& texture : _textures)
@@ -120,13 +160,25 @@ AssetCatalog::getConfig() const
     if (!specifictextures.empty())
         conf.add(specifictextures);
 
-    Config models("Models");
+    Config models("ModelAssets");
     for (auto& model : _models)
         models.add(model.second.getConfig());
     if (!models.empty())
         conf.add(models);
 
     return conf;
+}
+
+unsigned
+AssetCatalog::getLifeMapMatrixWidth() const
+{
+    return _lifemapMatrixWidth;
+}
+
+unsigned
+AssetCatalog::getLifeMapMatrixHeight() const
+{
+    return _lifemapMatrixHeight;
 }
 
 const std::vector<LifeMapTextureAsset>&
@@ -152,41 +204,6 @@ bool
 AssetCatalog::empty() const
 {
     return _models.empty() && _textures.empty();
-}
-
-//..........................................................
-
-ModelCategory::ModelCategory(const Config& conf, AssetCatalog* assets)
-{
-    conf.get("name", name());
-    ConfigSet mc = conf.children("model");
-    for (const auto& c : mc)
-    {
-        const ModelAsset* asset = assets->getModel(c.value("name"));
-        if (asset)
-        {
-            Member member;
-            member.asset = asset;
-            member.weight = (float)c.value("weight", 1.0f);
-            member.fill = (float)c.value("fill", 1.0f);
-            _members.push_back(std::move(member));
-        }
-        else
-        {
-            OE_WARN << LC << "ModelCategory \"" << name().get() << "\""
-                << " references unknown asset \"" << c.value("name")  << "\""
-                << std::endl;
-        }
-    }
-}
-
-Config
-ModelCategory::getConfig() const
-{
-    Config conf;
-    //TODO
-    OE_WARN << __func__ << " not implemented" << std::endl;
-    return conf;
 }
 
 //...................................................................
@@ -256,15 +273,26 @@ LifeMapValueTable::getValue(const std::string& id) const
 
 //...................................................................
 
-Biome::Biome(const Config& conf, AssetCatalog* assets)
+Biome::Biome(const Config& conf, AssetCatalog* assetCatalog)
 {
     conf.get("name", name());
     conf.get("id", id());
 
-    ConfigSet categories = conf.children("modelcategory");
-    for (const auto& child : categories)
+    ConfigSet assets = conf.child("assets").children("asset");
+    for (const auto& child : assets)
     {
-        modelCategories().emplace_back(child, assets);
+        ModelAssetPointer m;
+        m.asset = assetCatalog->getModel(child.value("name"));
+        if (m.asset)
+        {
+            m.weight = 1.0f;
+            child.get("weight", m.weight);
+            m.fill = 1.0f;
+            child.get("fill", m.fill);
+
+            if (m.asset->_group < NUM_ASSET_GROUPS)
+                _modelgroups[m.asset->_group].emplace_back(m);
+        }
     }
 }
 
@@ -278,19 +306,6 @@ Biome::getConfig() const
     OE_WARN << __func__ << " not implemented" << std::endl;
 
     return conf;
-}
-
-const ModelCategory*
-Biome::getModelCategory(const std::string& name) const
-{
-    for (const auto& i : modelCategories())
-    {
-        if (Strings::ciEquals(i.name().get(), name))
-        {
-            return &i;
-        }
-    }
-    return nullptr;
 }
 
 //..........................................................

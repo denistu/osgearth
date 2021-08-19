@@ -20,7 +20,7 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
 #include "BiomeLayer"
-#include "Random"
+#include <osgEarth/Random>"
 #include <osgEarth/rtree.h>
 
 using namespace osgEarth;
@@ -35,7 +35,7 @@ REGISTER_OSGEARTH_LAYER(biomes, BiomeLayer);
 void
 BiomeLayer::Options::fromConfig(const Config& conf)
 {
-    blendRadius().setDefault(0.0);
+    blendRadius().setDefault(0.02);
     biomeidField().setDefault("biomeid");
 
     biomeCatalog() = std::make_shared<BiomeCatalog>(conf.child("biomecatalog"));
@@ -88,8 +88,13 @@ void
 BiomeLayer::init()
 {
     ImageLayer::init();
+
+    // BiomeLayer is invisible AND shared by default.
+    options().visible().setDefault(false);
+    options().shared().setDefault(true);
+
     _index = nullptr;
-    setProfile(Profile::create("global-geodetic"));
+    setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
 }
 
 Status
@@ -275,10 +280,49 @@ BiomeLayer::createImageImplementation(
         });
 
     GeoImage result(image.get(), key.getExtent());
+    
+    trackImage(result, key, biomeids_seen);
 
+    return std::move(result);
+}
+
+void
+BiomeLayer::postCreateImageImplementation(
+    GeoImage& createdImage,
+    const TileKey& key,
+    ProgressCallback* progress) const
+{
+    if (createdImage.getTrackingToken() == nullptr)
+    {
+        // if there's no tracking token (e.g., this image came from the cache)
+        // build and attach one now.
+        GeoImageIterator iter(createdImage);
+        ImageUtils::PixelReader read(createdImage.getImage());
+
+        std::set<int> biomeids_seen;
+        osg::Vec4 pixel;
+
+        iter.forEachPixel([&]()
+            {
+                int biomeid = 0;
+                read(pixel, iter.s(), iter.t());
+                int biome = (int)(pixel.r()*255.0f);
+                biomeids_seen.insert(biome);
+            });
+
+        trackImage(createdImage, key, biomeids_seen);
+    }
+}
+
+void
+BiomeLayer::trackImage(
+    GeoImage& image,
+    const TileKey& key,
+    std::set<int>& biomeids) const
+{
     // inform the biome manager that we are using the biomes corresponding
     // to the biome ID's we collected
-    for (auto biomeid : biomeids_seen)
+    for (auto biomeid : biomeids)
     {
         const Biome* biome = getBiomeCatalog()->getBiome(biomeid);
         if (biome)
@@ -290,13 +334,11 @@ BiomeLayer::createImageImplementation(
     // destructs, and we can unref the usage in the BiomeManager accordingly.
     // This works, but reverses the flow of control, so maybe
     // there is a better solution -gw
-    osg::Object* token = new BiomeTrackerToken(std::move(biomeids_seen));
+    osg::Object* token = new BiomeTrackerToken(std::move(biomeids));
     token->setName(Stringify() << "BiomeLayer " << key.str());
-    result.setTrackingToken(token);
+    image.setTrackingToken(token);
     token->addObserver(const_cast<BiomeLayer*>(this));
     _tracker.scoped_lock([&]() { _tracker[token] = key; });
-
-    return std::move(result);
 }
 
 void

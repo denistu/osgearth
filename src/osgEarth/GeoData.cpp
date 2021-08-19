@@ -24,6 +24,7 @@
 #include <osgEarth/Terrain>
 #include <osgEarth/GDAL>
 #include <osgEarth/Metrics>
+#include <osg/BoundingBox>
 
 using namespace osgEarth;
 
@@ -165,23 +166,18 @@ GeoPoint::getConfig() const
     {
         conf.set( "lat", _p.y() );
         conf.set( "long", _p.x() );
-        if ( _p.z() != 0.0 )
-        {
-            if ( _altMode == ALTMODE_ABSOLUTE )
-                conf.set( "alt", _p.z() );
-            else
-                conf.set( "hat", _p.z() );
-        }
     }
     else
     {
         conf.set( "x", _p.x() );
         conf.set( "y", _p.y() );
-        if ( _altMode == ALTMODE_ABSOLUTE )
-            conf.set( "z", _p.z() );
-        else
-            conf.set( "hat", _p.z() );
     }
+
+    conf.set("z", _p.z());
+
+    // default is absolute
+    if (_altMode == ALTMODE_RELATIVE)
+        conf.set("mode", "relative");
 
     if ( _srs.valid() )
     {
@@ -462,6 +458,15 @@ GeoPoint::createWorldToLocal( osg::Matrixd& out_w2l ) const
     return result;
 }
 
+GeoPoint
+GeoPoint::toLocalTangentPlane() const
+{
+    if (!isValid())
+        return GeoPoint::INVALID;
+
+    return transform(getSRS()->createTangentPlaneSRS(vec3d()));
+}
+
 bool
 GeoPoint::createWorldUpVector( osg::Vec3d& out_up ) const
 {
@@ -487,7 +492,7 @@ GeoPoint::createWorldUpVector( osg::Vec3d& out_up ) const
         osg::Vec3d ecef;
         if ( this->toWorld( ecef ) )
         {
-            out_up = _srs->getEllipsoid()->computeLocalUpVector( ecef.x(), ecef.y(), ecef.z() );
+            out_up = _srs->getEllipsoid().geocentricToUpVector(ecef);
             return true;
         }
     }
@@ -522,58 +527,45 @@ GeoPoint::interpolate(const GeoPoint& rhs, double t) const
 
     else // geographic
     {
-        // Geometric slerp in unit sphere space
-        // https://en.wikipedia.org/wiki/Slerp#Geometric_Slerp
+        osg::Vec3d output;
 
-        double deltaZ = to.z()-z();
+        getSRS()->getEllipsoid().geodesicInterpolate(
+            vec3d(),
+            to.vec3d(),
+            t,
+            output);
 
-        // Convert each point to unit sphere world space:
-        osg::Vec3d unitToEllip(
-            getSRS()->getEllipsoid()->getRadiusEquator(),
-            getSRS()->getEllipsoid()->getRadiusEquator(),
-            getSRS()->getEllipsoid()->getRadiusPolar());
-
-        osg::Vec3d ellipToUnit = osg::componentDivide(
-            osg::Vec3d(1,1,1), unitToEllip);
-        
-        osg::Vec3d w1;
-        toWorld(w1);
-        w1 = osg::componentMultiply(w1, ellipToUnit);
-        w1.normalize();
-
-        osg::Vec3d w2;
-        to.toWorld(w2);
-        w2 = osg::componentMultiply(w2, ellipToUnit);
-        w2.normalize();
-
-        // perform geometric slerp:
-        double dp = w1*w2;
-        if (dp == 1.0)
-            return *this;
-
-        double angle = acos(dp);
-
-        double s = sin(angle);
-        if (s == 0.0)
-            return *this;
-
-        double c1 = sin((1.0-t)*angle)/s;
-        double c2 = sin(t*angle)/s;
-
-        osg::Vec3d n = w1*c1 + w2*c2;
-
-        // convert back to world space and apply altitude lerp
-        n = osg::componentMultiply(n, unitToEllip);
-        result.fromWorld(getSRS(), n);
-        result.z() = z() + t*deltaZ;
+        result.set(
+            getSRS(),
+            output,
+            ALTMODE_ABSOLUTE);
     }
 
     return result;
 }
 
+Distance
+GeoPoint::geodesicDistanceTo(const GeoPoint& rhs) const
+{
+    // Transform both points to lat/long and do a great circle measurement.
+    // https://en.wikipedia.org/wiki/Geographical_distance#Ellipsoidal-surface_formulae
+
+    GeoPoint p1 = transform(getSRS()->getGeographicSRS());
+    GeoPoint p2 = rhs.transform(p1.getSRS());
+
+    return Distance(
+        getSRS()->getEllipsoid().geodesicDistance(
+            osg::Vec2d(p1.x(), p1.y()),
+            osg::Vec2d(p2.x(), p2.y())),
+        Units::METERS);
+}
+
+
 double
 GeoPoint::distanceTo(const GeoPoint& rhs) const
 {
+    // @deprecated, because this method is ambiguous.
+
     if ( getSRS()->isProjected() && rhs.getSRS()->isProjected() )
     {
         if ( getSRS()->isEquivalentTo(rhs.getSRS()) )
@@ -593,8 +585,8 @@ GeoPoint::distanceTo(const GeoPoint& rhs) const
         GeoPoint p1 = transform( getSRS()->getGeographicSRS() );
         GeoPoint p2 = rhs.transform( p1.getSRS() );
 
-        double Re = getSRS()->getEllipsoid()->getRadiusEquator();
-        double Rp = getSRS()->getEllipsoid()->getRadiusPolar();
+        double Re = getSRS()->getEllipsoid().getRadiusEquator();
+        double Rp = getSRS()->getEllipsoid().getRadiusPolar();
         double F  = (Re-Rp)/Re; // flattening
 
         double
@@ -623,7 +615,7 @@ GeoPoint::distanceTo(const GeoPoint& rhs) const
         double dist = Re*(G-(F/2.0)*(X+Y));
 
         // NaN could mean start/end points are the same
-        return osg::isNaN(dist)? 0.0 : dist;
+        return std::isnan(dist)? 0.0 : dist;
     }
 }
 
@@ -853,11 +845,11 @@ GeoPoint
 GeoExtent::getCentroid() const
 {
     if (isValid())
-        return std::move(GeoPoint(
+        return GeoPoint(
             _srs.get(),
             normalizeX(west() + 0.5*width()),
             south() + 0.5*height(),
-            ALTMODE_ABSOLUTE));
+            ALTMODE_ABSOLUTE);
     else
         return GeoPoint::INVALID;
 }
@@ -880,7 +872,7 @@ GeoExtent::width(const Units& units) const
     }
     else {
         Distance d(width(), getSRS()->getUnits());
-        double m_per_deg = 2.0 * getSRS()->getEllipsoid()->getRadiusEquator() * osg::PI / 360.0;
+        double m_per_deg = 2.0 * getSRS()->getEllipsoid().getRadiusEquator() * osg::PI / 360.0;
         double d0 = m_per_deg * cos(yMin()) * width();
         double d1 = m_per_deg * cos(yMax()) * height();
         return Distance(std::max(d0, d1), Units::METERS).as(units);
@@ -896,8 +888,9 @@ GeoExtent::height(const Units& units) const
         return Units::convert(getSRS()->getUnits(), units, width());
     }
     else {
-        double m_per_deg = 2.0 * getSRS()->getEllipsoid()->getRadiusEquator() * osg::PI / 360.0;
-        return Distance(m_per_deg * height(), Units::METERS).as(units);
+        return Distance(
+            getSRS()->getEllipsoid().longitudinalDegreesToMeters(height(), 0.0),
+            Units::METERS).as(units);
     }
 }
 
@@ -1640,18 +1633,53 @@ GeoExtent::createWorldBoundingSphere(double minElev, double maxElev) const
         GeoPoint(getSRS(), xMin(), yMin(), minElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
         GeoPoint(getSRS(), xMax(), yMax(), maxElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
     }
-
     else // geocentric
     {
-        osg::Vec3d w;
-        GeoPoint(getSRS(), xMin(), yMin(), minElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
-        GeoPoint(getSRS(), xMax(), yMin(), minElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
-        GeoPoint(getSRS(), xMax(), yMax(), minElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
-        GeoPoint(getSRS(), xMin(), yMax(), minElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
-        GeoPoint(getSRS(), xMin(), yMin(), maxElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
-        GeoPoint(getSRS(), xMax(), yMin(), maxElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
-        GeoPoint(getSRS(), xMax(), yMax(), maxElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
-        GeoPoint(getSRS(), xMin(), yMax(), maxElev, ALTMODE_ABSOLUTE).toWorld(w); bs.expandBy(w);
+        // Sample points along the extent
+        std::vector< osg::Vec3d > samplePoints;
+
+        int samples = 7;
+
+        double xSample = width() / (double)(samples - 1);
+        double ySample = height() / (double)(samples - 1);
+
+        for (int c = 0; c < samples; c++)
+        {
+            double x = xMin() + (double)c * xSample;
+            for (int r = 0; r < samples; r++)
+            {
+                double y = yMin() + (double)r * ySample;
+                
+                osg::Vec3d world;
+                GeoPoint(getSRS(), x, y, minElev, ALTMODE_ABSOLUTE).toWorld(world);
+                samplePoints.push_back(world);               
+                GeoPoint(getSRS(), x, y, maxElev, ALTMODE_ABSOLUTE).toWorld(world);
+                samplePoints.push_back(world);
+            }
+        }
+
+        // Compute the bounding box of the sample points
+        osg::BoundingBoxd bb;
+        for (auto& p : samplePoints)
+        {
+            bb.expandBy(p);
+        }
+
+        // The center of the bounding sphere is the center of the bounding box
+        bs.center() = bb.center();
+
+        // Compute the max radius based on the distance from the bounding boxes center.
+        double maxRadius = -DBL_MAX;
+
+        for (auto& p : samplePoints)
+        {
+            double r = (p - bs.center()).length();
+            if (r > maxRadius) maxRadius = r;
+        }
+
+        bs.radius() = maxRadius;
+
+        return bs;
     }
 
     return bs;
@@ -1753,51 +1781,44 @@ _maxLevel( 19u )
 GeoImage GeoImage::INVALID( 0L, GeoExtent::INVALID );
 
 GeoImage::GeoImage() :
-    _myimage(0L),
+    _myimage(nullptr),
     _extent(GeoExtent::INVALID),
-    _status(Status::GeneralError)
+    _status()
 {
     //nop
 }
 
 GeoImage::GeoImage(const Status& status) :
-    _myimage(0L),
+    _myimage(nullptr),
     _extent(GeoExtent::INVALID),
     _status(status)
 {
-    if (_status.isOK())
-        _status = Status::GeneralError;
+    //nop
 }
 
 GeoImage::GeoImage(const osg::Image* image, const GeoExtent& extent) :
     _myimage(image),
     _extent(extent)
 {
-    if (_myimage.valid() && extent.isInvalid())
+    if (extent.isInvalid())
     {
-        OE_WARN << LC << "ILLEGAL: created a GeoImage with a valid image and an invalid extent" << std::endl;
-        _status = Status::GeneralError;
-    }
-    else if (!_myimage.valid())
-    {
-        _status = Status::GeneralError;
+        _status.set(Status::AssertionFailure, "Invalid geoextent");
     }
 }
 
 GeoImage::GeoImage(Threading::Future<osg::ref_ptr<osg::Image>> fimage, const GeoExtent& extent) :
-    _myimage(0L),
+    _myimage(nullptr),
     _extent(extent)
 {
     _future = fimage;
 
     if (_future->isAbandoned())
     {
-        _status = Status::ResourceUnavailable;
+        _status.set(Status::ResourceUnavailable, "Async request canceled");
     }
     else if (extent.isInvalid())
     {
-        OE_WARN << LC << "ILLEGAL: created a GeoImage with a valid image and an invalid extent" << std::endl;
-        _status = Status::GeneralError;
+        _status.set(Status::GeneralError, "Invalid geoextent");
     }
 }
 
@@ -1816,7 +1837,7 @@ const osg::Image*
 GeoImage::getImage() const
 {
     return _future.isSet() && _future->isAvailable() ?
-        _future->get().get() :
+        _future->join().get() :
         _myimage.get();
 }
 
@@ -1965,7 +1986,7 @@ namespace
         double *srcPointsX = new double[numPixels * 2];
         double *srcPointsY = srcPointsX + numPixels;
 
-        dest_extent.getSRS()->transformExtentPoints(
+        dest_extent.getSRS()->transformGrid(
             src_extent.getSRS(),
             dest_extent.xMin() + .5 * dx, dest_extent.yMin() + .5 * dy,
             dest_extent.xMax() - .5 * dx, dest_extent.yMax() - .5 * dy,
@@ -2126,7 +2147,7 @@ GeoImage::takeImage()
     osg::ref_ptr<osg::Image> result;
     if (_future.isSet())
     {
-        result = _future->get();
+        result = _future->join();
         _future->abandon();
     }
     else
@@ -2190,8 +2211,7 @@ GeoHeightField::init()
 {
     if ( _heightField.valid() && _extent.isInvalid() )
     {
-        OE_WARN << LC << "Created with a valid heightfield AND INVALID extent" << std::endl;
-        _status = Status::GeneralError;
+        _status.set(Status::GeneralError, "invalid heightfield or geoextent");
     }
 
     else if ( _heightField.valid() )
@@ -2226,7 +2246,7 @@ GeoHeightField::init()
 
     else if (!_heightField.valid())
     {
-        _status = Status::GeneralError;
+        _status.set(Status::GeneralError, "invalid heightfield");
     }
 }
 
@@ -2385,7 +2405,7 @@ GeoNode GeoNode::INVALID;
 
 GeoNode::GeoNode() :
     _extent( GeoExtent::INVALID ),
-    _status( Status::GeneralError )
+    _status()
 {
     //nop
 }
@@ -2394,8 +2414,7 @@ GeoNode::GeoNode(const Status& status) :
     _extent(GeoExtent::INVALID),
     _status(status)
 {
-    if (_status.isOK())
-        _status = Status::GeneralError;
+    //nop
 }
 
 GeoNode::GeoNode(const osg::Node* node, const GeoExtent& extent) :
@@ -2405,10 +2424,6 @@ GeoNode::GeoNode(const osg::Node* node, const GeoExtent& extent) :
     if (_node.valid() && extent.isInvalid())
     {
         _status = Status(Status::GeneralError, "ILLEGAL: created a GeoImage with a valid image and an invalid extent");
-    }
-    else if (!_node.valid())
-    {
-        _status = Status::GeneralError;
     }
 }
 

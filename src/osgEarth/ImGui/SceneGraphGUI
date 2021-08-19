@@ -22,11 +22,105 @@
 #include "ImGui"
 #include <osgEarth/AnnotationUtils>
 #include <osg/PolygonMode>
+#include <osgEarth/TerrainEngineNode>
+#include <osgEarth/PagedNode>
+#include <osg/io_utils>
 
 namespace osgEarth {
     namespace GUI
     {
         using namespace osgEarth;
+
+
+        
+        template<typename T>
+        std::string printArrayValue(const T* array)
+        {
+            std::stringstream buf;
+            unsigned int size = array->size();
+            for (unsigned i = 0; i < size; ++i)
+            {
+                if (i > 0)
+                {
+                    buf << ", ";
+                }
+                buf << (*array)[i];
+            }
+            return buf.str();
+        }
+
+        template<typename T>
+        void printArrayTable(const std::string& name, const T* array)
+        {
+            if (!array) return;
+
+            if (ImGui::BeginTable(name.c_str(), 2, ImGuiTableFlags_Borders))
+            {
+                unsigned int size = array->size();
+                for (unsigned i = 0; i < size; ++i)
+                {
+                    std::stringstream val;
+                    ImGui::TableNextColumn(); ImGui::Text("%d", i);
+                    val << (*array)[i];
+                    ImGui::TableNextColumn(); ImGui::Text(val.str().c_str());
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        template<typename T>
+        void printArrayTablePretty(const std::string& name, const T* array)
+        {
+            if (!array) return;
+            static ImGuiTableFlags flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV | ImGuiTableFlags_SizingFixedFit;
+
+            const float TEXT_BASE_HEIGHT = ImGui::GetTextLineHeightWithSpacing();
+
+            // When using ScrollX or ScrollY we need to specify a size for our table container!
+            // Otherwise by default the table will fit all available space, like a BeginChild() call.
+            ImVec2 outer_size = ImVec2(0.0f, TEXT_BASE_HEIGHT * 8);
+            if (ImGui::BeginTable(name.c_str(), 2, flags, outer_size))
+            {
+                ImGui::TableSetupScrollFreeze(0, 1); // Make top row always visible
+                ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_None);
+                ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_None);
+                ImGui::TableHeadersRow();
+
+                ImGuiListClipper clipper;
+                clipper.Begin(array->size());
+                while (clipper.Step())
+                {
+                    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                    {
+                        ImGui::TableNextRow();
+
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("%d", i);
+
+                        ImGui::TableSetColumnIndex(1);
+
+                        std::stringstream val;
+                        val << (*array)[i];
+                        ImGui::Text(val.str().c_str());
+                    }
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        
+
+        static std::string printUniformValue(osg::Uniform* uniform)
+        {            
+            if (uniform->getFloatArray()) return printArrayValue(uniform->getFloatArray());
+            if (uniform->getDoubleArray()) return printArrayValue(uniform->getDoubleArray());
+            if (uniform->getIntArray()) return printArrayValue(uniform->getIntArray());
+            if (uniform->getUIntArray()) return printArrayValue(uniform->getUIntArray());
+            if (uniform->getUInt64Array()) return printArrayValue(uniform->getUInt64Array());
+            if (uniform->getInt64Array()) return printArrayValue(uniform->getInt64Array());
+
+            return "";
+        }
 
 
         class SceneGraphGUI : public BaseGUI
@@ -39,6 +133,7 @@ namespace osgEarth {
                 SceneHierarchyVisitor() :
                     osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN)
                 {
+                    setNodeMaskOverride(~0);
                 }
 
                 void apply(osg::Node& node)
@@ -54,8 +149,8 @@ namespace osgEarth {
 
                     ImGui::TreeNodeEx(&node, node_flags, label.c_str());
                     if (ImGui::IsItemClicked())
-                    {
-                        setSelectedNode(&node);
+                    {                                         
+                        setSelectedNodePath(getNodePath());
                     }
                 }
 
@@ -75,8 +170,8 @@ namespace osgEarth {
 
                     bool node_open = ImGui::TreeNodeEx(&node, node_flags, label.c_str());
                     if (ImGui::IsItemClicked())
-                    {
-                        setSelectedNode(&node);
+                    {                     
+                        setSelectedNodePath(getNodePath());
                     }
                     if (node_open)
                     {
@@ -95,26 +190,19 @@ namespace osgEarth {
 
                 bool isInSelectedNodePath(osg::Node* node)
                 {
-                    if (_selectedNodePaths.empty() && getSelectedNode())
-                    {
-                        _selectedNodePaths = getSelectedNode()->getParentalNodePaths();
-                    }
+                    auto selectedNodePaths = getSelectedNodePath();                    
 
-                    for (unsigned int i = 0; i < _selectedNodePaths.size(); i++)
+                    for (unsigned int i = 0; i < selectedNodePaths.size(); i++)
                     {
-                        for (unsigned int j = 0; j < _selectedNodePaths[i].size(); j++)
+                        if (node == selectedNodePaths[i].get())
                         {
-                            if (node == _selectedNodePaths[i][j])
-                            {
-                                return true;
-                            }
+                            return true;
                         }
                     }
                     return false;
                 }
 
                 ImGuiTreeNodeFlags base_flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
-                osg::NodePathList _selectedNodePaths;
             };
 
             SceneGraphGUI() :
@@ -146,7 +234,7 @@ namespace osgEarth {
                     }
 
                     auto size = ImGui::GetWindowSize();
-
+                    
                     if (ImGui::CollapsingHeader("Scene"))
                     {
                         ImGui::BeginChild("Scene", ImVec2(0, 0.6f * size.y));
@@ -172,7 +260,10 @@ namespace osgEarth {
                 // If they closed the tool deselect the node.
                 if (!isVisible() && getSelectedNode())
                 {
-                    setSelectedNode(nullptr);
+                    // TODO:
+                    //setSelectedNode(nullptr);
+                    osg::NodePath empty;
+                    setSelectedNodePath(empty);
                 }
 
                 updateBoundsDebug(_mapNode.get());
@@ -190,7 +281,18 @@ namespace osgEarth {
 
                 if (selectedNode)
                 {
-                    osg::NodePath nodePath = selectedNode->getParentalNodePaths()[0];
+                    osg::RefNodePath refNodePath = getSelectedNodePath();
+                    osg::NodePath nodePath;
+                    for (unsigned int i = 0; i < refNodePath.size(); ++i)
+                    {
+                        nodePath.push_back(refNodePath[i].get());
+                    }
+                    
+                    if (nodePath.back()->asTransform())
+                    {
+                        nodePath.pop_back();
+                    }
+
                     osg::Matrixd localToWorld = osg::computeLocalToWorld(nodePath);
 
                     osg::Drawable* drawable = selectedNode->asDrawable();
@@ -201,11 +303,14 @@ namespace osgEarth {
                         {
                             _selectedBounds = new osg::MatrixTransform;
                             _selectedBounds->setName("Bounds");
-                            localToWorld.preMultTranslate(bb.center());
                             _selectedBounds->setMatrix(localToWorld);
-                            _selectedBounds->addChild(AnnotationUtils::createBoundingBox(bb, Color::Yellow));
-                            mapNode->addChild(_selectedBounds);
 
+                            osg::MatrixTransform* center = new osg::MatrixTransform;
+                            center->addChild(AnnotationUtils::createBoundingBox(bb, Color::Yellow));
+                            _selectedBounds->addChild(center);                           
+
+                            _selectedBounds->setNodeMask(1 << 2);
+                            mapNode->addChild(_selectedBounds);
                         }
                     }
                     else
@@ -215,10 +320,15 @@ namespace osgEarth {
                         {
                             _selectedBounds = new osg::MatrixTransform;
                             _selectedBounds->setName("Bounds");
-                            localToWorld.preMultTranslate(selectedNode->getBound().center());
                             _selectedBounds->setMatrix(localToWorld);
-                            _selectedBounds->addChild(AnnotationUtils::createSphere(selectedNode->getBound().radius(), Color::Yellow));
+
+                            osg::MatrixTransform* center = new osg::MatrixTransform;
+                            center->setMatrix(osg::Matrix::translate(bs.center()));
+                            center->addChild(AnnotationUtils::createSphere(selectedNode->getBound().radius(), Color::Yellow));
+                            _selectedBounds->addChild(center);
+
                             _selectedBounds->getOrCreateStateSet()->setAttributeAndModes(new osg::PolygonMode(osg::PolygonMode::FRONT_AND_BACK, osg::PolygonMode::LINE), 1);
+                            _selectedBounds->setNodeMask(1 << 2);
                             mapNode->addChild(_selectedBounds);
                         }
                     }
@@ -259,10 +369,33 @@ namespace osgEarth {
                     }
                 }
 
+                bool visible = node->getNodeMask() != 0;
+                if (ImGui::Checkbox("Visible", &visible))
+                {
+                    node->setNodeMask(visible);
+                }
+
                 if (ImGui::TreeNode("General"))
                 {
                     ImGui::Text("Type %s", typeid(*node).name());
                     ImGui::Text("Name %s", node->getName().c_str());
+
+                    osg::Drawable* drawable = node->asDrawable();
+                    if (drawable)
+                    {                        
+                        osg::BoundingBox bbox = drawable->getBoundingBox();
+                        double width = bbox.xMax() - bbox.xMin();
+                        double depth = bbox.yMax() - bbox.yMin();
+                        double height = bbox.zMax() - bbox.zMin();
+
+                        ImGui::Text("Bounding box (local) center=(%.3f, %.3f, %.3f) dimensions=%.3f x %.3f %.3f", bbox.center().x(), bbox.center().y(), bbox.center().z(), width, depth, height);
+                    }
+                    else
+                    {
+                        osg::BoundingSphere bs = node->getBound();
+                        ImGui::Text("Bounding sphere (local) center=(%.3f, %.3f, %.3f) radius=%.3f", bs.center().x(), bs.center().y(), bs.center().z(), bs.radius());
+                    }
+
                     ImGui::TreePop();
                 }
 
@@ -296,6 +429,28 @@ namespace osgEarth {
                             matrixTransform->setMatrix(newMatrix);
                         }
                         ImGui::TreePop();
+                    }
+                }
+
+                osgEarth::PagedNode2* pagedNode2 = dynamic_cast<osgEarth::PagedNode2*>(node);
+                if (pagedNode2)
+                {
+                    if (ImGui::TreeNode("PagedNode"))
+                    {
+                        ImGui::Text("Min range %.3f", pagedNode2->getMinRange());
+                        ImGui::Text("Max range %.3f", pagedNode2->getMaxRange());
+                        ImGui::TreePop();
+                    }
+                }
+
+                osgEarth::Contrib::ThreeDTiles::ThreeDTileNode* threeDTiles = dynamic_cast<osgEarth::Contrib::ThreeDTiles::ThreeDTileNode*>(node);
+                if (threeDTiles)
+                {
+                    if (ImGui::TreeNode("3D Tiles"))
+                    {                       
+                        std::string content = threeDTiles->getTile()->content()->getJSON().toStyledString();
+                        ImGui::Text("Content");
+                        ImGui::TextWrapped(content.c_str());
                     }
                 }
 
@@ -339,6 +494,31 @@ namespace osgEarth {
                             ImGui::TreePop();
                         }
 
+                        if (!stateset->getUniformList().empty())
+                        {
+                            if (ImGui::TreeNode("Uniforms"))
+                            {       
+                                if (ImGui::BeginTable("Uniforms", 3, ImGuiTableFlags_Borders))
+                                {
+                                    for (auto& u : stateset->getUniformList())
+                                    {
+
+                                        osg::Uniform* uniform = dynamic_cast<osg::Uniform*>(u.second.first.get());
+                                        if (uniform)
+                                        {
+                                            // Name
+                                            ImGui::TableNextColumn(); ImGui::Text(u.first.c_str());
+                                            // Type
+                                            ImGui::TableNextColumn(); ImGui::Text(osg::Uniform::getTypename(uniform->getType()));
+                                            // Value
+                                            ImGui::TableNextColumn(); ImGui::Text(printUniformValue(uniform).c_str());
+                                        }
+                                    }
+                                    ImGui::EndTable();
+                                }
+                            }
+                        }                        
+
                         ImGui::TreePop();
                     }
                 }
@@ -348,17 +528,32 @@ namespace osgEarth {
                 {
                     if (geometry->getVertexArray())
                     {
-                        ImGui::Text("Vertices %d", geometry->getVertexArray()->getNumElements());
+                        if (ImGui::TreeNode("Vertices"))
+                        {                            
+                            ImGui::Text("%d elements", geometry->getVertexArray()->getNumElements());
+                            printArrayTablePretty("Vertices", static_cast<osg::Vec3Array*>(geometry->getVertexArray()));
+                            ImGui::TreePop();
+                        }
                     }
 
                     if (geometry->getColorArray())
                     {
-                        ImGui::Text("Colors %d", geometry->getColorArray()->getNumElements());
+                        if (ImGui::TreeNode("Colors"))
+                        {
+                            ImGui::Text("%d elements", geometry->getColorArray()->getNumElements());
+                            printArrayTablePretty("Colors", static_cast<osg::Vec4Array*>(geometry->getColorArray()));
+                            ImGui::TreePop();
+                        }
                     }
 
                     if (geometry->getNormalArray())
                     {
-                        ImGui::Text("Normals %d", geometry->getNormalArray()->getNumElements());
+                        if (ImGui::TreeNode("Normals"))
+                        {
+                            ImGui::Text("%d elements", geometry->getNormalArray()->getNumElements());
+                            printArrayTablePretty("Normals", static_cast<osg::Vec3Array*>(geometry->getNormalArray()));
+                            ImGui::TreePop();
+                        }
                     }
 
                     for (auto &p : geometry->getPrimitiveSetList())

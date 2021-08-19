@@ -22,20 +22,110 @@
 #include "GL/glew.h"
 #include "imgui.h"
 #include "imgui_internal.h"
-#include "OsgImGuiHandler"
 #include <osg/Texture2D>
 #include <osg/RenderInfo>
 #include <osgViewer/View>
+#include <osgViewer/ViewerEventHandlers>
+#include <osgEarth/Config>
 #include <osgEarth/GeoData>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/MapNode>
 #include <osgEarth/Terrain>
 #include <typeinfo>
 
+
+namespace osg {
+    class Camera;
+}
+
+struct ImGuiSettingsHandler;
+
 namespace osgEarth
 {
     namespace GUI
     {
+
+        class GlewInitOperation : public osg::Operation
+        {
+        public:
+            GlewInitOperation()
+                : osg::Operation("GlewInitCallback", false)
+            {
+            }
+
+            void operator()(osg::Object* object) override
+            {
+                osg::GraphicsContext* context = dynamic_cast<osg::GraphicsContext*>(object);
+                if (!context)
+                {
+                    return;
+                }
+
+                if (glewInit() != GLEW_OK)
+                {
+                    OSG_FATAL << "glewInit() failed" << std::endl;
+                }
+            }
+        };
+
+
+        class OsgImGuiHandler : public osgGA::GUIEventHandler
+        {
+        public:
+            OsgImGuiHandler();
+
+            bool handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa) override;
+
+            class RealizeOperation : public osgEarth::GUI::GlewInitOperation
+            {
+                void operator()(osg::Object* object) override;
+            };
+
+            virtual void load(void* section, const std::string& key, const std::string& value) { }
+
+            virtual void save(osgEarth::Config& conf) { }
+
+            virtual void* find(const char* name) { return nullptr; }
+
+        protected:
+            // Put your ImGui code inside this function
+            virtual void draw(osg::RenderInfo& renderInfo) = 0;
+            friend class RealizeOperation;
+
+            virtual void init();
+
+        private:
+            
+
+            void setCameraCallbacks(osg::Camera* camera);
+
+            void newFrame(osg::RenderInfo& renderInfo);
+
+            void render(osg::RenderInfo& renderInfo);
+
+        private:
+            struct ImGuiNewFrameCallback;
+            struct ImGuiRenderCallback;
+
+            double time_;
+            bool mousePressed_[3];
+            bool mouseDoubleClicked_[3];
+            float mouseWheel_;
+            bool initialized_;
+            bool firstFrame_;
+
+            static void* handleStartEntry(
+                ImGuiContext* ctx, ImGuiSettingsHandler* handler, const char* name);
+
+            static void handleReadSetting(ImGuiContext* ctx, ImGuiSettingsHandler* handler, void* entry, const char* line);
+
+            static void handleWriteSettings(ImGuiContext* ctx, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf);
+
+            void installSettingsHandler();
+        };
+
+
+
         // base class for GUI elements that allows you to toggle visibility
         class BaseGUI
         {
@@ -99,6 +189,18 @@ namespace osgEarth
                 return node.valid();
             }
 
+            template<typename T>
+            bool findLayerOrHide(osg::observer_ptr<T>& layer, osg::RenderInfo& ri) {
+                if (!layer.valid()) {
+                    MapNode* mapNode = osgEarth::findTopMostNodeOfType<MapNode>(ri.getCurrentCamera());
+                    if (mapNode)
+                        layer = mapNode->getMap()->getLayer<T>();
+                }
+                if (!layer.valid())
+                    setVisible(false);
+                return layer.valid();
+            }
+
             //! sets a value and dirties the .ini store
             template<typename A, typename B>
             void set_and_dirty(A& var, const B& value)
@@ -146,7 +248,12 @@ namespace osgEarth
             //! tells ImGui it needs to write a new .ini file
             static void dirtySettings() {
                 if (ImGui::GetCurrentContext())
-                    ImGui::MarkIniSettingsDirty(ImGui::GetCurrentWindowRead());
+                {
+                    if (ImGui::GetCurrentWindowRead())
+                    {
+                        ImGui::MarkIniSettingsDirty(ImGui::GetCurrentWindowRead());
+                    }
+                }
             }
 
             //! whether the visibility changed (and resets the flag)
@@ -156,21 +263,12 @@ namespace osgEarth
                 return whether;
             }
         };
+        
 
+        extern osg::Node* getSelectedNode();
+        extern const osg::RefNodePath& getSelectedNodePath();
 
-
-        // Manages the single selected node in the application.
-        static osg::ref_ptr< osg::Node > s_selectedNode;
-
-        static osg::Node* getSelectedNode()
-        {
-            return s_selectedNode.get();
-        }
-
-        static void setSelectedNode(osg::Node* node)
-        {
-            s_selectedNode = node;
-        }
+        void setSelectedNodePath(const osg::NodePath& nodePath);
 
         struct SelectNodeHandler : public osgGA::GUIEventHandler
         {
@@ -184,20 +282,25 @@ namespace osgEarth
 
                 if (ea.getEventType() == ea.PUSH && ea.getButton() == ea.LEFT_MOUSE_BUTTON && ea.getModKeyMask() & osgGA::GUIEventAdapter::MODKEY_CTRL)
                 {
-                    osgUtil::LineSegmentIntersector::Intersections intersections;
+                    float w = 5.0;
+                    float h = 5.0;
 
-                    if (view->computeIntersections(ea, intersections))
-                    {
-                        double currRatio = DBL_MAX;
-                        for (auto hitr = intersections.begin(); hitr != intersections.end(); ++hitr)
-                        {
-                            if (hitr->ratio < currRatio)
-                            {
-                                setSelectedNode(hitr->drawable.get());
-                                currRatio = hitr->ratio;
-                            }
+                    float x = ea.getX();
+                    float y = ea.getY();
 
-                        }
+                    osg::ref_ptr< osgUtil::PolytopeIntersector> picker = new osgUtil::PolytopeIntersector(osgUtil::Intersector::WINDOW, x - w, y - h, x + w, y + h);
+                    picker->setIntersectionLimit(osgUtil::Intersector::LIMIT_NEAREST);
+                    osgUtil::IntersectionVisitor iv(picker.get());
+                    // This is a hack, but we set the node mask to something other than 1 << 2 which is what the "selected bounds" node mask is set to to avoid picking it.  
+                    // We should rework this later into something more formal so we can add widget type nodes that aren't generally interacted with.
+                    iv.setTraversalMask((1 << 1));
+                    view->getCamera()->accept(iv);
+                    if (picker->containsIntersections())
+                    {    
+                        osg::NodePath nodePath = picker->getIntersections().begin()->nodePath;
+                        nodePath.push_back(picker->getIntersections().begin()->drawable.get());
+                        setSelectedNodePath(nodePath);
+
                     }
                 }
                 return false;
@@ -246,9 +349,8 @@ namespace ImGuiUtil
         osg::Texture::TextureObject* textureObject = texture->getTextureObject(contextID);
         if (textureObject)
         {
-            //double h = 100.0;
-            //double w = ar * h;
-            ImGui::Image((void*)(intptr_t)textureObject->_id, ImVec2(w, h), ImVec2(0, 1), ImVec2(1, 0), ImVec4(1, 1, 1, 1), ImVec4(1, 1, 0, 1));
+            bool flip = (texture->getImage() && texture->getImage()->getOrigin() == osg::Image::TOP_LEFT);
+            ImGui::Image((void*)(intptr_t)textureObject->_id, ImVec2(w, h), ImVec2(0, flip ? 0 : 1), ImVec2(1, flip ? 1 : 0), ImVec4(1, 1, 1, 1), ImVec4(1, 1, 0, 1));
         }
     }
 }
@@ -263,6 +365,8 @@ namespace ImGuiUtil
 #include "EphemerisGUI"
 #include "TerrainGUI"
 #include "TerrainEditGUI"
+#include "ShaderGUI"
+#include "CameraGUI"
 
 #ifdef OSGEARTH_HAVE_GEOCODER
 #include "SearchGUI"
@@ -280,19 +384,32 @@ namespace osgEarth
             using GUIPtr = std::unique_ptr<BaseGUI>;
 
             //! Add all the built-in GUIs
-            ApplicationGUI(bool addBuiltIns =false) : OsgImGuiHandler()
+            ApplicationGUI(
+                bool addBuiltIns = false) : OsgImGuiHandler()
             {
                 if (addBuiltIns)
                 {
-                    addAllBuiltInTools();
+                    addAllBuiltInTools(nullptr);
+                }
+            }
+
+            //! Add all the built-in GUIs
+            ApplicationGUI(
+                osg::ArgumentParser& args,
+                bool addBuiltIns =false) : OsgImGuiHandler()
+            {
+                if (addBuiltIns)
+                {
+                    addAllBuiltInTools(&args);
                 }
             }
 
             //! Adds all built-in osgEarth GUI panels
-            void addAllBuiltInTools()
+            void addAllBuiltInTools(osg::ArgumentParser* args =nullptr)
             {
                 _menu["Tools"].push_back(GUIPtr(new LayersGUI));
                 _menu["Tools"].push_back(GUIPtr(new ViewpointsGUI));
+                _menu["Tools"].push_back(GUIPtr(new CameraGUI));
                 _menu["Tools"].push_back(GUIPtr(new EphemerisGUI));
                 _menu["Tools"].push_back(GUIPtr(new TerrainGUI));
                 _menu["Tools"].push_back(GUIPtr(new SystemGUI));
@@ -301,6 +418,7 @@ namespace osgEarth
                 _menu["Tools"].push_back(GUIPtr(new SceneGraphGUI));
                 _menu["Tools"].push_back(GUIPtr(new TextureInspectorGUI));
                 _menu["Tools"].push_back(GUIPtr(new TerrainEditGUI));
+                _menu["Tools"].push_back(GUIPtr(new ShaderGUI(args)));
 
 #ifdef OSGEARTH_HAVE_GEOCODER
                 _menu["Tools"].push_back(GUIPtr(new SearchGUI));
@@ -310,7 +428,7 @@ namespace osgEarth
             //! User adds a gui to the default User menu
             void add(BaseGUI* gui, bool visible=false)
             {
-                OE_SOFT_ASSERT_AND_RETURN(gui, __func__, );
+                OE_SOFT_ASSERT_AND_RETURN(gui, void());
                 gui->setVisible(visible);
                 _menu["User"].push_back(GUIPtr(gui));
             }
@@ -318,7 +436,7 @@ namespace osgEarth
             //! User adds a gui to a named menu
             void add(const std::string& menu, BaseGUI* gui, bool visible=false)
             {
-                OE_SOFT_ASSERT_AND_RETURN(gui, __func__, );
+                OE_SOFT_ASSERT_AND_RETURN(gui, void());
                 gui->setVisible(visible);
                 if (menu.empty())
                     add(gui, visible);

@@ -31,7 +31,8 @@
 #include <osgDB/ReadFile>
 #include <cstdlib> // getenv
 
-#define LC "[TextureSplattingLayer] " << getName() << ": "
+#define LC0 "[TextureSplattingLayer] "
+#define LC LC0 << getName() << ": "
 
 using namespace osgEarth::Procedural;
 
@@ -66,6 +67,14 @@ namespace
     {
         osg::ref_ptr<TextureArena> arena = new TextureArena();
 
+        if (cat.getLifeMapMatrixHeight() * cat.getLifeMapMatrixWidth() !=
+            cat.getLifeMapTextures().size())
+        {
+            OE_WARN << LC0 << "Configuration error: LifeMapTextures count does not match width*height"
+                << std::endl;
+            return nullptr;
+        }
+
         for (int i = 0; i < 2; ++i)
         {
             auto texList =
@@ -88,7 +97,7 @@ namespace
 
                 auto t1 = std::chrono::steady_clock::now();
 
-                OE_INFO << tex.uri()->base()
+                OE_INFO << LC0 << "Loaded texture " << tex.uri()->base()
                     << ", t=" << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms"
                     << std::endl;
 
@@ -189,6 +198,11 @@ TextureSplattingLayer::prepareForRendering(TerrainEngine* engine)
         setStatus(Status::ResourceUnavailable, "No Biome data to splat");
         return;
     }
+
+    // default uniform values
+    osg::StateSet* ss = getOrCreateStateSet();
+    ss->addUniform(new osg::Uniform("oe_splat_blend_start", 2500.0f));
+    ss->addUniform(new osg::Uniform("oe_splat_blend_end", 500.0f));
 }
 
 void
@@ -225,6 +239,13 @@ TextureSplattingLayer::buildStateSets()
         ss->setDefine(
             "OE_LIFEMAP_MAT",
             getLifeMapLayer()->getSharedTextureMatrixUniformName());
+
+        if (getBiomeLayer())
+        {
+            const auto& assets = getBiomeLayer()->getBiomeCatalog()->getAssets();
+            ss->setDefine("OE_TEX_DIM_X", std::to_string(assets.getLifeMapMatrixWidth()));
+            ss->setDefine("OE_TEX_DIM_Y", std::to_string(assets.getLifeMapMatrixHeight()));
+        }
     }
 }
 

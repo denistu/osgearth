@@ -41,6 +41,7 @@ PagedNode2::PagedNode2() :
     _compileTriggered(false),
     _mergeTriggered(false),
     _merged(false),
+    _failed(false),
     _minRange(0.0f),
     _maxRange(FLT_MAX),
     _minPixels(0.0f),
@@ -70,6 +71,13 @@ PagedNode2::isHighestResolution() const
 }
 
 void
+PagedNode2::setLoadFunction(const Loader& value)
+{
+    unload();
+    _load = value;
+}
+
+void
 PagedNode2::traverse(osg::NodeVisitor& nv)
 {
     // locate the paging manager if there is one
@@ -87,63 +95,79 @@ PagedNode2::traverse(osg::NodeVisitor& nv)
     if (nv.getTraversalMode() == nv.TRAVERSE_ALL_CHILDREN)
     {
         for (auto& child : _children)
-            child->accept(nv);
+            OE_IF_SOFT_ASSERT(child.valid())
+                child->accept(nv);
     }
 
     else if (nv.getTraversalMode() == nv.TRAVERSE_ACTIVE_CHILDREN)
     {
-        bool inRange = false;
-        float priority = 0.0f;
-
-        if (_useRange) // meters
+        if (nv.getVisitorType() == nv.INTERSECTION_VISITOR)
         {
-            float range = nv.getDistanceToViewPoint(getBound().center(), true);
-            // check that range > 0 to avoid trouble from some visitors
-            inRange = (range > 0.0f && range >= _minRange && range <= _maxRange);
-            priority = -range * _priorityScale;
-        }
-        else // pixels
-        {
-            osg::CullStack* cullStack = nv.asCullStack();
-            if (cullStack != nullptr && cullStack->getLODScale() > 0.0f)
-            {
-                float pixels = cullStack->clampedPixelSize(getBound()) / cullStack->getLODScale();
-                inRange = (pixels >= _minPixels && pixels <= _maxPixels);
-                priority = pixels * _priorityScale;
-            }
-        }
-
-        if (inRange)
-        {
-            load(priority, &nv);
-
-            // finally, traverse children and paged data.
-            if (_refinePolicy == REFINE_REPLACE &&
-                _merged == true)
-            {
-                _compiled.get()->accept(nv);
-            }
-            else
-            {
-                for (auto& child : _children)
-                    child->accept(nv);
-            }
-
-            touch();
+            traverseChildren(nv);
         }
         else
         {
-            // child out of range; just accept static children
-            for (auto& child : _children)
-            {
-                osg::Node* compiled =
-                    _compiled.isAvailable() ? _compiled.get().get() :
-                    nullptr;
+            bool inRange = false;
+            float priority = 0.0f;
 
-                if (child.get() != compiled)
-                    child->accept(nv);
+            if (_useRange) // meters
+            {
+                float range = std::max(0.0f, nv.getDistanceToViewPoint(getBound().center(), true) - getBound().radius());
+                inRange = (range >= _minRange && range <= _maxRange);
+                priority = -range * _priorityScale;
+            }
+            else // pixels
+            {
+                osg::CullStack* cullStack = nv.asCullStack();
+                if (cullStack != nullptr && cullStack->getLODScale() > 0.0f)
+                {
+                    float pixels = cullStack->clampedPixelSize(getBound()) / cullStack->getLODScale();
+                    inRange = (pixels >= _minPixels && pixels <= _maxPixels);
+                    priority = pixels * _priorityScale;
+                }
+            }
+
+            if (inRange)
+            {
+                // load paged child if necessary
+                load(priority, &nv);
+
+                // traverse children
+                traverseChildren(nv);
+
+                // stay alive
+                touch();
+            }
+            else
+            {
+                // child out of range; just accept static children
+                for (auto& child : _children)
+                {
+                    osg::Node* compiled =
+                        _compiled.isAvailable() ? _compiled.get().get() :
+                        nullptr;
+
+                    if (child.get() != compiled)
+                        child->accept(nv);
+                }
             }
         }
+    }
+}
+
+void
+PagedNode2::traverseChildren(osg::NodeVisitor& nv)
+{
+    if (_refinePolicy == REFINE_REPLACE &&
+        _merged == true &&
+        _compiled.get().valid())
+    {
+        _compiled.get()->accept(nv);
+    }
+    else
+    {
+        for (auto& child : _children)
+            child->accept(nv);
     }
 }
 
@@ -167,14 +191,14 @@ PagedNode2::merge(int revision)
     if (_revision == revision)
     {
         //static std::set<osg::Node*> nodes;
-        //OE_SOFT_ASSERT_AND_RETURN(nodes.count(this) == 0, __func__, false);
+        //OE_SOFT_ASSERT_AND_RETURN(nodes.count(this) == 0, false);
         //nodes.insert(this);
 
         // This is called from PagingManager.
         // We're in the UPDATE traversal.
-        OE_SOFT_ASSERT_AND_RETURN(_merged == false, __func__, false);
-        OE_SOFT_ASSERT_AND_RETURN(_compiled.isAvailable(), __func__, false);
-        OE_SOFT_ASSERT_AND_RETURN(_compiled.get().valid(), __func__, false);
+        OE_SOFT_ASSERT_AND_RETURN(_merged == false, false);
+        OE_SOFT_ASSERT_AND_RETURN(_compiled.isAvailable(), false);
+        OE_SOFT_ASSERT_AND_RETURN(_compiled.get().valid(), false);
 
         addChild(_compiled.get());
 
@@ -182,6 +206,7 @@ PagedNode2::merge(int revision)
             _callbacks->firePostMergeNode(_compiled.get().get());
 
         _merged = true;
+        _failed = false;
     }
     return _merged;
 }
@@ -255,7 +280,7 @@ void PagedNode2::load(float priority, const osg::Object* host)
         else
         {
             // There is no load function so go all the way to the end of the state machine.
-            _merged = true;
+            _failed = true;
             _compileTriggered.exchange(true);
             _mergeTriggered.exchange(true);
         }
@@ -292,7 +317,7 @@ void PagedNode2::load(float priority, const osg::Object* host)
         else
         {
             // The node returned was null, so we need to just go to the end of the state machine
-            _merged = true;
+            _failed = true;
             _mergeTriggered.exchange(true);
         }
 
@@ -304,7 +329,7 @@ void PagedNode2::load(float priority, const osg::Object* host)
         _pagingManager != nullptr &&
         _mergeTriggered.exchange(true) == false)
     {
-        // Submit this node to the paging manager for merging.i
+        // Submit this node to the paging manager for merging.
         _pagingManager->merge(this);
     }
 }
@@ -318,7 +343,7 @@ void PagedNode2::unload()
     //}
     if (_compiled.isAvailable() && _compiled.get().valid())
     {
-        removeChild(_compiled.get().get());
+        removeChild(_compiled.get());
     }
     _compiled.abandon();
     _loaded.abandon();
@@ -326,6 +351,7 @@ void PagedNode2::unload()
     _compileTriggered = false;
     _mergeTriggered = false;
     _merged = false;
+    _failed = false;
     _token = nullptr;
 
     // prevents a node in the PagingManager's merge queue from
@@ -335,7 +361,7 @@ void PagedNode2::unload()
 
 bool PagedNode2::isLoaded() const
 {
-    return _merged;
+    return _merged || _failed;
 }
 
 PagingManager::PagingManager() :
@@ -346,29 +372,44 @@ PagingManager::PagingManager() :
     _newFrame(false)
 {
     setCullingActive(false);
-    //ADJUST_UPDATE_TRAV_COUNT(this, +1);
+    ADJUST_UPDATE_TRAV_COUNT(this, +1);
     JobArena::get(PAGEDNODE_ARENA_NAME)->setConcurrency(4u);
 
-    osg::observer_ptr<PagingManager> pm_ptr(this);
-    _updateFunc = [pm_ptr](Cancelable*) mutable
-    {
-        osg::ref_ptr<PagingManager> pm(pm_ptr);
-        if (pm.valid())
-        {
-            pm->update();
-            Job(JobArena::get(JobArena::UPDATE_TRAVERSAL))
-                .dispatch(pm->_updateFunc);
-        }
-    };
+    // NOTE: this is causing multiple model layers to not appear.
+    // Need to debug before using.
+    //osg::observer_ptr<PagingManager> pm_ptr(this);
+    //_updateFunc = [pm_ptr](Cancelable*) mutable
+    //{
+    //    osg::ref_ptr<PagingManager> pm(pm_ptr);
+    //    if (pm.valid())
+    //    {
+    //        pm->update();
+    //        Job(JobArena::get(JobArena::UPDATE_TRAVERSAL))
+    //            .dispatch(pm->_updateFunc);
+    //    }
+    //};
 
-    Job(JobArena::get(JobArena::UPDATE_TRAVERSAL))
-        .dispatch(_updateFunc);
+    //Job(JobArena::get(JobArena::UPDATE_TRAVERSAL))
+    //    .dispatch(_updateFunc);
 }
 
 void
 PagingManager::traverse(osg::NodeVisitor& nv)
 {
     ObjectStorage::set(&nv, this);
+
+    if (nv.getVisitorType() == nv.CULL_VISITOR)
+    {
+        _newFrame.exchange(true);
+    }
+
+    else if (
+        nv.getVisitorType() == nv.UPDATE_VISITOR &&
+        _newFrame.exchange(false) == true)
+    {
+        update();
+    }
+
     osg::Group::traverse(nv);
 }
 

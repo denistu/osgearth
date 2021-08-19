@@ -21,6 +21,7 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/Units>
+#include <osgEarth/Ellipsoid>
 #include <osgEarth/VerticalDatum>
 #include <osgEarth/Threading>
 #include <osgEarth/Containers>
@@ -140,19 +141,17 @@ namespace osgEarth
 
     public: // extent transformations.
         
-        /**
-         * Transforms a spatial extent to another SRS. The transformed extent will
-         * actually be the minimum bounding axis-aligned rectangle that would hold
-         * the source extent.
-         */
+        //! Transforms a minimum bounding rectangle from this SRS to another.
+        //! The operation is not necessarily commutitive.
         virtual bool transformExtentToMBR(
             const SpatialReference* to_srs,
-            double&                 in_out_xmin, 
-            double&                 in_out_ymin,
-            double&                 in_out_xmax, 
-            double&                 in_out_ymax ) const;
+            double& in_out_xmin, 
+            double& in_out_ymin,
+            double& in_out_xmax, 
+            double& in_out_ymax ) const;
         
-        virtual bool transformExtentPoints(
+        //! Transforms a 2D grid of points from this SRS to another.
+        virtual bool transformGrid(
             const SpatialReference* to_srs,
             double in_xmin, double in_ymin,
             double in_xmax, double in_ymax,
@@ -223,7 +222,7 @@ namespace osgEarth
         const std::string& getName() const;
 
         /** Gets the underlying reference ellipsoid of this SRS */
-        const osg::EllipsoidModel* getEllipsoid() const;
+        const Ellipsoid& getEllipsoid() const;
 
         /** Gets the WKT string */
         const std::string& getWKT() const;
@@ -292,9 +291,6 @@ namespace osgEarth
             contained in this spatial reference. This is an approximation of a Plate Carre
             SRS but using equatorial meters. */
         const SpatialReference* createEquirectangularSRS() const;
-
-        /** Creates a new CSN based on this spatial reference. */
-        osg::CoordinateSystemNode* createCoordinateSystemNode() const;
 
         /** Populates the provided CSN with information from this SRS. */
         bool populateCoordinateSystemNode( osg::CoordinateSystemNode* csn ) const;
@@ -388,7 +384,7 @@ namespace osgEarth
         std::string _datum;
         Units _units;
         double _reportedLinearUnits;
-        osg::ref_ptr<osg::EllipsoidModel> _ellipsoid;
+        Ellipsoid _ellipsoid;
         mutable osg::ref_ptr<SpatialReference> _geo_srs;
         mutable osg::ref_ptr<SpatialReference> _geodetic_srs;  // _geo_srs with a NULL vdatum.
         mutable osg::ref_ptr<SpatialReference> _geocentric_srs;

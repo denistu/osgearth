@@ -174,6 +174,7 @@ osg::Image* BundleReader::readImage(unsigned int index, const osgDB::ReaderWrite
 
 void BundleReader::readFeatures(const TileKey& key, FeatureList& features)
 {
+#ifdef OSGEARTH_HAVE_MVT
     // Figure out the index for the tilekey
     unsigned int row = key.getTileX() - _colOffset;
     unsigned int index = key.getTileY() - _rowOffset + (row * _bundleSize);
@@ -194,6 +195,9 @@ void BundleReader::readFeatures(const TileKey& key, FeatureList& features)
 
         osgEarth::MVT::readTile(ss, key, features);
     }
+#else
+    OE_WARN << LC << "osgEarth is not built with MVT/PBF support" << std::endl;
+#endif
 }
 
 //........................................................................
@@ -369,7 +373,7 @@ ArcGISTilePackageImageLayer::openImplementation()
         else
         {
             // finally, fall back on mercator
-            profile = Profile::create("spherical-mercator");
+            profile = Profile::create(Profile::SPHERICAL_MERCATOR);
         }
         setProfile(profile);
     }
@@ -430,11 +434,11 @@ ArcGISTilePackageImageLayer::readConf()
             {
                 if (srs->isMercator())
                 {
-                    setProfile(Profile::create("spherical-mercator"));
+                    setProfile(Profile::create(Profile::SPHERICAL_MERCATOR));
                 }
                 else
                 {
-                    setProfile(Profile::create("global-geodetic"));
+                    setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
                 }
             }
         }
@@ -511,7 +515,7 @@ ArcGISTilePackageElevationLayer::openImplementation()
         else
         {
             // finally, fall back on mercator
-            profile = Profile::create("spherical-mercator");
+            profile = Profile::create(Profile::SPHERICAL_MERCATOR);
         }
         setProfile(profile);
     }
@@ -574,11 +578,11 @@ ArcGISTilePackageElevationLayer::readConf()
             {
                 if (srs->isMercator())
                 {
-                    setProfile(Profile::create("spherical-mercator"));
+                    setProfile(Profile::create(Profile::SPHERICAL_MERCATOR));
                 }
                 else
                 {
-                    setProfile(Profile::create("global-geodetic"));
+                    setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
                 }
             }
         }
@@ -643,16 +647,16 @@ VTPKFeatureSource::openImplementation()
     std::string wkid = root["tileInfo"]["spatialReference"]["latestWkid"].asString();
     if (wkid == "3857")
     {
-        profile = osgEarth::Registry::instance()->getGlobalMercatorProfile();
+        profile = Profile::create(Profile::SPHERICAL_MERCATOR);
     }
     else if (wkid == "4326")
     {
-        profile = osgEarth::Registry::instance()->getGlobalGeodeticProfile();
+        profile = Profile::create(Profile::GLOBAL_GEODETIC);
     }
     if (!profile)
     {
         // Assume it's mercator
-        profile = osgEarth::Registry::instance()->getGlobalMercatorProfile();
+        profile = Profile::create(Profile::SPHERICAL_MERCATOR);
     }
 
     FeatureProfile* featureProfile = new FeatureProfile(profile);

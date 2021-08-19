@@ -18,10 +18,6 @@
  */
 #include <osgEarth/FeatureRasterizer>
 #include <osgEarth/Metrics>
-#include <osgEarth/TransformFilter>
-#include <osgEarth/BufferFilter>
-#include <osgEarth/ResampleFilter>
-#include <osgEarth/AGG.h>
 #include <osgEarth/Registry>
 
 #include <osgEarth/FeatureSource>
@@ -32,12 +28,16 @@ using namespace osgEarth;
 #define LC "[FeatureRasterizer] : "
 
 #ifdef OSGEARTH_HAVE_BLEND2D
+#define USE_BLEND2D
+#endif
+
+#ifdef USE_BLEND2D
 #include <blend2d.h>
 #endif
 
-#ifndef OSGEARTH_HAVE_BLEND2D
-#define USE_AGGLITE
-#endif
+#include <osgEarth/AGG.h>
+#include <osgEarth/BufferFilter>
+#include <osgEarth/ResampleFilter>
 
 namespace osgEarth {
     namespace FeatureImageLayerImpl
@@ -48,7 +48,6 @@ namespace osgEarth {
             double xf, yf;
         };
 
-#ifdef USE_AGGLITE
         struct float32
         {
             float32() : value(NO_DATA_VALUE) { }
@@ -164,9 +163,9 @@ namespace osgEarth {
             ras.reset();
         }
 
-#else
+#ifdef USE_BLEND2D
 
-        void rasterizePolygons(
+        void rasterizePolygons_blend2d(
             const Geometry* geometry,
             const PolygonSymbol* symbol,
             RenderFrame& frame,
@@ -193,8 +192,15 @@ namespace osgEarth {
             });
 
             osg::Vec4 color = symbol->fill().isSet() ? symbol->fill()->color() : Color::White;
+            // Fill the path
             ctx.setFillStyle(BLRgba(color.r(), color.g(), color.b(), color.a()));
             ctx.fillPath(path);
+
+            // Also stroke a 1 pixel path around the polygon with the same color to help cover up any gaps between any adjoining features.
+            ctx.setStrokeStyle(BLRgba(color.r(), color.g(), color.b(), color.a()));
+            ctx.setStrokeWidth(1.0);
+            ctx.strokePath(path);
+
         }
 
         void rasterizeLines(
@@ -204,8 +210,8 @@ namespace osgEarth {
             RenderFrame& frame,
             BLContext& ctx)
         {
-            OE_HARD_ASSERT(geometry != nullptr, __func__);
-            OE_HARD_ASSERT(symbol != nullptr, __func__);
+            OE_HARD_ASSERT(geometry != nullptr);
+            OE_HARD_ASSERT(symbol != nullptr);
 
             OE_PROFILING_ZONE;
 
@@ -306,13 +312,13 @@ namespace osgEarth {
 
         void rasterizeSymbols(
             const Feature* feature,
-            StyleSheet* styleSheet,
+            const StyleSheet* styleSheet,
             const TextSymbol* textSymbol,
             const SkinSymbol* skinSymbol,
             RenderFrame& frame,
             BLContext& ctx)
         {
-            OE_HARD_ASSERT(feature != nullptr, __func__);
+            OE_HARD_ASSERT(feature != nullptr);
 
             OE_PROFILING_ZONE;
 
@@ -419,43 +425,54 @@ namespace osgEarth {
 using namespace osgEarth::FeatureImageLayerImpl;
 
 
-FeatureRasterizer::FeatureRasterizer(unsigned int width, unsigned int height, const GeoExtent& extent, const Color& backgroundColor):
+FeatureRasterizer::FeatureRasterizer(
+    unsigned int width, unsigned int height, 
+    const GeoExtent& extent, 
+    const Color& backgroundColor) :
+
     _extent(extent)
 {
     // Allocate the image and initialize it to the background color
     _image = new osg::Image();
     _image->allocateImage(width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE);
     ImageUtils::PixelWriter write(_image.get());
-    write.assign(backgroundColor);
+
+#ifdef USE_BLEND2D
+    osg::Vec4 bg(backgroundColor.b(), backgroundColor.g(), backgroundColor.r(), backgroundColor.a());
+    _implPixelFormat = RF_BGRA;
+    _inverted = true;
+#else
+    osg::Vec4 bg(backgroundColor.a(), backgroundColor.b(), backgroundColor.g(), backgroundColor.r());
+    _implPixelFormat = RF_ABGR;
+    _inverted = false;
+#endif
+
+    write.assign(bg);    
+}
+
+
+FeatureRasterizer::FeatureRasterizer(
+    osg::Image* image,
+    const GeoExtent& extent) :
+
+    _image(image),
+    _extent(extent)
+{
+    //nop
 }
 
 void
-FeatureRasterizer::render(
-    Session* session,
+FeatureRasterizer::render_blend2d(
+    const FeatureList& features,
     const Style& style,
     const FeatureProfile* profile,
-    const FeatureList& in_features) const
+    const StyleSheet* sheet)
 {
-    OE_PROFILING_ZONE;
+#ifdef USE_BLEND2D
 
-    OE_DEBUG << LC << "Rendering " << in_features.size() << " features" << std::endl;
-
-    // A processing context to use with the filters:
-    FilterContext context(session);
-    context.setProfile(profile);
-
-    // local (shallow) copy
-    FeatureList features(in_features);
-
-    // TODO: do we need to resample?
-
-    // Transform to map SRS:
-    {
-        OE_PROFILING_ZONE_NAMED("Transform");
-        TransformFilter xform(_extent.getSRS());
-        xform.setLocalizeCoordinates(false);
-        xform.push(features, context);
-    }
+    // agglite renders in this format:
+    _implPixelFormat = RF_BGRA;
+    _inverted = true;
 
     // find the symbology:
     const LineSymbol* masterLine = style.getSymbol<LineSymbol>();
@@ -473,8 +490,6 @@ FeatureRasterizer::render(
     frame.xf = (double)_image->s() / _extent.width();
     frame.yf = (double)_image->t() / _extent.height();
 
-#ifndef USE_AGGLITE
-
     // set up the render target:
     BLImage buf;
     buf.createFromData(_image->s(), _image->t(), BL_FORMAT_PRGB32, _image->data(), _image->s() * 4);
@@ -489,7 +504,7 @@ FeatureRasterizer::render(
         {
             if (feature->getGeometry())
             {
-                rasterizePolygons(feature->getGeometry(), masterPoly, frame, ctx);
+                rasterizePolygons_blend2d(feature->getGeometry(), masterPoly, frame, ctx);
             }
         }
     }
@@ -558,18 +573,49 @@ FeatureRasterizer::render(
         {
             if (feature->getGeometry())
             {
-                rasterizeSymbols(feature.get(), session->styles(), masterText, masterSkin, frame, ctx);
+                rasterizeSymbols(feature.get(), sheet, masterText, masterSkin, frame, ctx);
             }
         }
     }
 
     ctx.end();
 
-#else
+#endif // USE_BLEND2D
+}
+
+void
+FeatureRasterizer::render_agglite(
+    const FeatureList& features,
+    const Style& style,
+    const FeatureProfile* profile,
+    const StyleSheet* sheet)
+{
+    // agglite renders in this format:
+    _implPixelFormat = RF_ABGR;
+    _inverted = false;
+
+    // find the symbology:
+    const LineSymbol* masterLine = style.getSymbol<LineSymbol>();
+    const PolygonSymbol* masterPoly = style.getSymbol<PolygonSymbol>();
+    const CoverageSymbol* masterCov = style.getSymbol<CoverageSymbol>();
+
+    // Converts coordinates to image space (s,t):
+    RenderFrame frame;
+    frame.xmin = _extent.xMin();
+    frame.ymin = _extent.yMin();
+    frame.xmax = _extent.xMax();
+    frame.ymax = _extent.yMax();
+    frame.xf = (double)_image->s() / _extent.width();
+    frame.yf = (double)_image->t() / _extent.height();
 
     // sort into bins, making a copy for lines that require buffering.
     FeatureList polygons;
     FeatureList lines;
+
+    FilterContext context;
+    const SpatialReference* featureSRS = features.front()->getSRS();
+
+    OE_SOFT_ASSERT_AND_RETURN(featureSRS != nullptr, void());
 
     for (FeatureList::const_iterator f = features.begin(); f != features.end(); ++f)
     {
@@ -618,7 +664,6 @@ FeatureRasterizer::render(
     {
         // We are buffering in the features native extent, so we need to use the
         // transformed extent to get the proper "resolution" for the image
-        const SpatialReference* featureSRS = context.profile()->getSRS();
         GeoExtent transformedExtent = _extent.transform(featureSRS);
 
         double trans_xf = (double)_image->s() / transformedExtent.width();
@@ -631,7 +676,6 @@ FeatureRasterizer::render(
         // downsample the line data so that it is no higher resolution than to image to which
         // we intend to rasterize it. If you don't do this, you run the risk of the buffer
         // operation taking forever on very high-res input data.
-        if (true) //options().optimizeLineSampling() == true)
         {
             OE_PROFILING_ZONE;
             ResampleFilter resample;
@@ -641,7 +685,11 @@ FeatureRasterizer::render(
 
         // now run the buffer operation on all lines:
         BufferFilter buffer;
-        double lineWidth = 1.0;
+
+        GeoExtent imageExtentInFeatureSRS = _extent.transform(featureSRS);
+        double pixelWidth = imageExtentInFeatureSRS.width() / (double)_image->s();
+        double lineWidth = pixelWidth;
+
         if (masterLine)
         {
             buffer.capStyle() = masterLine->stroke()->lineCap().value();
@@ -649,9 +697,6 @@ FeatureRasterizer::render(
             if (masterLine->stroke()->width().isSet())
             {
                 lineWidth = masterLine->stroke()->width().value();
-
-                GeoExtent imageExtentInFeatureSRS = _extent.transform(featureSRS);
-                double pixelWidth = imageExtentInFeatureSRS.width() / (double)_image->s();
 
                 // if the width units are specified, process them:
                 if (masterLine->stroke()->widthUnits().isSet() &&
@@ -674,7 +719,7 @@ FeatureRasterizer::render(
                             // linear to angular? approximate degrees per meter at the
                             // latitude of the tile's centroid.
                             double lineWidthM = masterLine->stroke()->widthUnits()->convertTo(Units::METERS, lineWidth);
-                            double mPerDegAtEquatorInv = 360.0 / (featureSRS->getEllipsoid()->getRadiusEquator() * 2.0 * osg::PI);
+                            double mPerDegAtEquatorInv = 360.0 / (featureSRS->getEllipsoid().getRadiusEquator() * 2.0 * osg::PI);
                             GeoPoint ll = _extent.getCentroid();
                             lineWidth = lineWidthM * mPerDegAtEquatorInv * cos(osg::DegreesToRadians(ll.y()));
                         }
@@ -700,10 +745,10 @@ FeatureRasterizer::render(
     // Transform the features into the map's SRS:
     {
         OE_PROFILING_ZONE_NAMED("Transform");
-        TransformFilter xform(_extent.getSRS());
-        xform.setLocalizeCoordinates(false);
-        xform.push(polygons, context);
-        xform.push(lines, context);
+        for (auto& polygon : polygons)
+            polygon->transform(_extent.getSRS());
+        for (auto& line : lines)
+            line->transform(_extent.getSRS());
     }
 
     // set up the AGG renderer:
@@ -764,18 +809,26 @@ FeatureRasterizer::render(
             osg::ref_ptr<Geometry> croppedGeometry;
             if (geometry->crop(cropPoly.get(), croppedGeometry))
             {
-                const PolygonSymbol* poly =
-                    feature->style().isSet() && feature->style()->has<PolygonSymbol>() ? feature->style()->get<PolygonSymbol>() :
-                    masterPoly;
+                if (!covValue.isSet())
+                {
+                    const PolygonSymbol* poly =
+                        feature->style().isSet() && feature->style()->has<PolygonSymbol>() ? feature->style()->get<PolygonSymbol>() :
+                        masterPoly;
 
                     Color color = poly ? poly->fill()->color() : Color::White;
                     rasterize_agglite(croppedGeometry.get(), color, frame, ras, rbuf);
+                }
+                else
+                {
+                    float value = feature->eval(covValue.mutable_value(), &context);
+                    rasterizeCoverage_agglite(croppedGeometry.get(), value, frame, ras, rbuf);
+                }
             }
         }
 
+
         if (!lines.empty())
         {
-            const SpatialReference* featureSRS = context.profile()->getSRS();
             float lineWidth = masterLine->stroke()->width().value();
             lineWidth = masterLine->stroke()->width().value();
             GeoExtent imageExtentInFeatureSRS = _extent.transform(featureSRS);
@@ -802,7 +855,7 @@ FeatureRasterizer::render(
                         // linear to angular? approximate degrees per meter at the
                         // latitude of the tile's centroid.
                         double lineWidthM = masterLine->stroke()->widthUnits()->convertTo(Units::METERS, lineWidth);
-                        double mPerDegAtEquatorInv = 360.0 / (featureSRS->getEllipsoid()->getRadiusEquator() * 2.0 * osg::PI);
+                        double mPerDegAtEquatorInv = 360.0 / (featureSRS->getEllipsoid().getRadiusEquator() * 2.0 * osg::PI);
                         double lon, lat;
                         _extent.getCentroid(lon, lat);
                         lineWidth = lineWidthM * mPerDegAtEquatorInv * cos(osg::DegreesToRadians(lat));
@@ -837,29 +890,74 @@ FeatureRasterizer::render(
             }
         }
     }
+}
+
+void
+FeatureRasterizer::render(
+    const FeatureList& features,
+    const Style& style,
+    const FeatureProfile* profile,
+    const StyleSheet* sheet)
+{
+    if (features.empty())
+        return;
+
+    OE_PROFILING_ZONE;
+
+    OE_DEBUG << LC << "Rendering " << features.size() << " features" << std::endl;
+
+    const SpatialReference* featureSRS = features.front()->getSRS();
+    OE_SOFT_ASSERT_AND_RETURN(featureSRS != nullptr, void());
+
+    // Transform to map SRS:
+    if (!featureSRS->isHorizEquivalentTo(_extent.getSRS()))
+    {
+        OE_PROFILING_ZONE_NAMED("Transform");
+        for (auto& feature : features)
+            feature->transform(_extent.getSRS());
+    }
+
+#ifdef USE_BLEND2D
+    if (style.get<CoverageSymbol>())
+        render_agglite(features, style, profile, sheet);
+    else
+        render_blend2d(features, style, profile, sheet);
+#else
+    render_agglite(features, style, profile, sheet);
 #endif
 }
 
 GeoImage
 FeatureRasterizer::finalize()
 {
-#ifdef USE_AGGLITE
-    //convert from ABGR to RGBA
-    unsigned char* pixel = _image->data();
-    for (int i = 0; i < _image->getTotalSizeInBytes(); i += 4, pixel += 4)
+    if (_image->getPixelSizeInBits() == 32 &&
+        _image->getDataType() == GL_UNSIGNED_BYTE)
     {
-        std::swap(pixel[0], pixel[3]);
-        std::swap(pixel[1], pixel[2]);
+        if (_implPixelFormat == RF_BGRA)
+        {
+            //convert from BGRA to RGBA
+            unsigned char* pixel = _image->data();
+            for (unsigned i = 0; i < _image->getTotalSizeInBytes(); i += 4, pixel += 4)
+            {
+                std::swap(pixel[0], pixel[2]);
+            }
+        }
+        else if (_implPixelFormat == RF_ABGR)
+        {
+            //convert from ABGR to RGBA
+            unsigned char* pixel = _image->data();
+            for (unsigned i = 0; i < _image->getTotalSizeInBytes(); i += 4, pixel += 4)
+            {
+                std::swap(pixel[0], pixel[3]);
+                std::swap(pixel[1], pixel[2]);
+            }
+        }
     }
-#else
-    //convert from BGRA to RGBA
-    unsigned char* pixel = _image->data();
-    for (int i = 0; i < _image->getTotalSizeInBytes(); i += 4, pixel += 4)
+
+    if (_inverted)
     {
-        std::swap(pixel[0], pixel[2]);
+        _image->flipVertical();
     }
-    _image->flipVertical();
-#endif
 
     return GeoImage(_image.release(), _extent);
 }
@@ -880,9 +978,9 @@ FeatureStyleSorter::sort(
     Function processFeaturesForStyle,
     ProgressCallback* progress) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(session, __func__, );
-    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource(), __func__, );
-    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource()->getFeatureProfile(), __func__, );
+    OE_SOFT_ASSERT_AND_RETURN(session, void());
+    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource(), void());
+    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource()->getFeatureProfile(), void());
 
     OE_PROFILING_ZONE;
 
@@ -1032,10 +1130,10 @@ FeatureStyleSorter::getFeatures(
     FeatureList& features,
     ProgressCallback* progress) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(session, __func__, );
-    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource(), __func__, );
-    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource()->getFeatureProfile(), __func__, );
-    OE_SOFT_ASSERT_AND_RETURN(workingExtent.isValid(), __func__, );
+    OE_SOFT_ASSERT_AND_RETURN(session != nullptr, void());
+    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource() != nullptr, void());
+    OE_SOFT_ASSERT_AND_RETURN(session->getFeatureSource()->getFeatureProfile() != nullptr, void());
+    OE_SOFT_ASSERT_AND_RETURN(workingExtent.isValid(), void());
 
     OE_PROFILING_ZONE;
 

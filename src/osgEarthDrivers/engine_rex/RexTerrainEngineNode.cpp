@@ -282,13 +282,8 @@ RexTerrainEngineNode::setMap(const Map* map, const TerrainOptions& inOptions)
     _liveTiles->setNotifyNeighbors(options().normalizeEdges() == true);
     _liveTiles->setFirstLOD(options().firstLOD().get());
 
-    // A resource releaser that will call releaseGLObjects() on expired objects.
-    _releaser = new ResourceReleaser();
-    this->addChild(_releaser.get());
-
     // A shared geometry pool.
     _geometryPool = new GeometryPool();
-    _geometryPool->setReleaser( _releaser.get());
     this->addChild( _geometryPool.get() );
 
     // Geometry compiler/merger
@@ -551,7 +546,7 @@ RexTerrainEngineNode::dirtyTerrain()
     // clear out the tile registry:
     if ( _liveTiles.valid() )
     {
-        _liveTiles->releaseAll(_releaser.get());
+        _liveTiles->releaseAll(nullptr);
     }
 
     // scrub the geometry pool:
@@ -577,10 +572,14 @@ RexTerrainEngineNode::dirtyTerrain()
 
     for( unsigned i=0; i<keys.size(); ++i )
     {
-        TileNode* tileNode = new TileNode();
+        TileNode* tileNode = new TileNode(
+            keys[i],
+            nullptr, // parent
+            _engineContext.get(),
+            nullptr); // progress
 
         // Next, build the surface geometry for the node.
-        tileNode->create( keys[i], 0L, _engineContext.get(), nullptr );
+        //tileNode->create( keys[i], 0L, _engineContext.get(), nullptr );
         tileNode->setDoNotExpire(true);
 
         // Add it to the scene graph
@@ -628,6 +627,7 @@ RexTerrainEngineNode::cacheAllLayerExtentsInMapSRS()
         cacheLayerExtentInMapSRS(i->get());
     }
 }
+
 void
 RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
 {
@@ -658,27 +658,22 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
 
     // Push all the layers to draw on to the cull visitor in the order in which
     // they appear in the map.
-    LayerDrawable* lastLayer = 0L;
+    LayerDrawable* lastLayer = nullptr;
     unsigned order = 0;
     bool surfaceStateSetPushed = false;
     bool imageLayerStateSetPushed = false;
     int layersDrawn = 0;
 
-    // LOOP over effectlayers..
-    // for each one, call culltraverse() on it to push a stateset;
-
-    for (LayerDrawableList::iterator i = culler._terrain.layers().begin();
-        i != culler._terrain.layers().end();
-        ++i)
+    for(osg::ref_ptr<LayerDrawable>& layerDrawable : culler._terrain.layers())
     {
         // Note: Cannot save lastLayer here because its _tiles may be empty, which can lead to a crash later
-        if (!i->get()->_tiles.empty())
+        if (!layerDrawable->_tiles.empty())
         {
-            lastLayer = i->get();
+            lastLayer = layerDrawable.get();
 
             // if this is a RENDERTYPE_TERRAIN_SURFACE, we need to activate either the
             // default surface state set or the image layer state set.
-            if (lastLayer->_renderType == Layer::RENDERTYPE_TERRAIN_SURFACE)
+            if (layerDrawable->_renderType == Layer::RENDERTYPE_TERRAIN_SURFACE)
             {
                 if (!surfaceStateSetPushed)
                 {
@@ -686,7 +681,7 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
                     surfaceStateSetPushed = true;
                 }
 
-                if (lastLayer->_imageLayer || lastLayer->_layer == NULL)
+                if (layerDrawable->_imageLayer || layerDrawable->_layer == nullptr)
                 {
                     if (!imageLayerStateSetPushed)
                     {
@@ -718,17 +713,13 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
                 }
             }
 
-            // perform any pre-draw finalization
-            lastLayer->finalize();
-
-
-            if (lastLayer->_layer)
+            if (layerDrawable->_layer)
             {
-                lastLayer->_layer->apply(lastLayer, cv);
+                layerDrawable->_layer->apply(layerDrawable.get(), cv);
             }
             else
             {
-                lastLayer->accept(*cv);
+                layerDrawable->accept(*cv);
             }
 
             ++layersDrawn;
@@ -775,7 +766,6 @@ RexTerrainEngineNode::cull_traverse(osg::NodeVisitor& nv)
     _geometryPool->accept(nv);
     _merger->accept(nv);
     _unloader->accept(nv);
-    _releaser->accept(nv);
 }
 
 void
@@ -825,6 +815,9 @@ RexTerrainEngineNode::update_traverse(osg::NodeVisitor& nv)
         if (layer->isOpen())
             layer->update(nv);
     }
+
+    // Call update on the tile registry
+    _liveTiles->update(nv);
 }
 
 void
@@ -995,7 +988,7 @@ RexTerrainEngineNode::onMapModelChanged( const MapModelChange& change )
 void
 RexTerrainEngineNode::cacheLayerExtentInMapSRS(Layer* layer)
 {
-    OE_SOFT_ASSERT_AND_RETURN(layer != nullptr, __func__,);
+    OE_SOFT_ASSERT_AND_RETURN(layer != nullptr, void());
 
     // Store the layer's extent in the map's SRS:
     LayerExtent& le = _cachedLayerExtents[layer->getUID()];

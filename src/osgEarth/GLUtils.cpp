@@ -270,7 +270,6 @@ GLBuffer::GLBuffer(GLenum target, osg::State& state, const std::string& label) :
     {
         bind();
         ext()->debugObjectLabel(GL_BUFFER, _name, label);
-        //GLObjectReleaser::watch(shared_from_this(), state);
     }
 }
 
@@ -315,7 +314,7 @@ GLTexture::GLTexture(GLenum target, osg::State& state, const std::string& label)
     glGenTextures(1, &_name);
     if (_name != ~0U)
     {
-        bind();
+        bind(state);
         ext()->debugObjectLabel(GL_TEXTURE, _name, label);
     }
 }
@@ -329,17 +328,25 @@ GLTexture::create(GLenum target, osg::State& state, const std::string& label)
 }
 
 void
-GLTexture::bind()
+GLTexture::bind(osg::State& state)
 {
     glBindTexture(_target, _name);
+
+    // must be called with a compatible state
+    // (same context under which the texture was created)
+    OE_SOFT_ASSERT(state.getContextID() == _ext->contextID);
+
+    // Inform OSG of the state change
+    state.haveAppliedTextureAttribute(
+        state.getActiveTextureUnit(), osg::StateAttribute::TEXTURE);
 }
 
 GLuint64
-GLTexture::handle()
+GLTexture::handle(osg::State& state)
 {
     if (_handle == ~0ULL)
     {
-        bind();
+        bind(state);
         _handle = ext()->glGetTextureHandle(_name);
     }
     return _handle;
@@ -359,7 +366,6 @@ GLTexture::makeResident(bool toggle)
 
         _isResident = toggle;
     }
-
 }
 
 void
@@ -797,7 +803,7 @@ ComputeImageSession::execute()
 void
 ComputeImageSession::render(osg::State* state)
 {
-    OE_SOFT_ASSERT_AND_RETURN(_image.valid(), __func__, );
+    OE_SOFT_ASSERT_AND_RETURN(_image.valid(), void());
 
     osg::GLExtensions* ext = state->get<osg::GLExtensions>();
 
@@ -937,8 +943,7 @@ GLObjectsCompiler::compileAsync(
 {
     Future<osg::ref_ptr<osg::Node>> result;
 
-    OE_SOFT_ASSERT_AND_RETURN(node.valid(), __func__, result);
-    //OE_SOFT_ASSERT_AND_RETURN(state != nullptr, __func__, result);
+    OE_SOFT_ASSERT_AND_RETURN(node.valid(), result);
 
     // if there is an ICO available, schedule the GPU compilation
     bool compileScheduled = false;

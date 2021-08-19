@@ -117,6 +117,10 @@ ProfileOptions::defined() const
 
 /***********************************************************************/
 
+std::string Profile::GLOBAL_GEODETIC("global-geodetic");
+std::string Profile::GLOBAL_MERCATOR("global-mercator");
+std::string Profile::SPHERICAL_MERCATOR("spherical-mercator");
+std::string Profile::PLATE_CARREE("plate-carree");
 
 // FACTORY METHODS:
 
@@ -147,7 +151,7 @@ Profile::create(const SpatialReference* srs,
                 unsigned int numTilesWideAtLod0,
                 unsigned int numTilesHighAtLod0)
 {
-    OE_SOFT_ASSERT_AND_RETURN(srs!=nullptr, __func__, nullptr);
+    OE_SOFT_ASSERT_AND_RETURN(srs!=nullptr, nullptr);
 
     return new Profile(
         srs,
@@ -159,7 +163,7 @@ Profile::create(const SpatialReference* srs,
 const Profile*
 Profile::create(const SpatialReference* srs)
 {
-    OE_SOFT_ASSERT_AND_RETURN(srs != nullptr, __func__, nullptr);
+    OE_SOFT_ASSERT_AND_RETURN(srs != nullptr, nullptr);
 
     Bounds bounds;
     if (srs->getBounds(bounds))
@@ -196,7 +200,7 @@ Profile::create(const SpatialReference* srs,
                 unsigned int numTilesWideAtLod0,
                 unsigned int numTilesHighAtLod0)
 {
-    OE_SOFT_ASSERT_AND_RETURN(srs!=nullptr, __func__, nullptr);
+    OE_SOFT_ASSERT_AND_RETURN(srs!=nullptr, nullptr);
 
     return new Profile(
         srs,
@@ -212,14 +216,9 @@ Profile::create(const std::string& srsInitString,
                 unsigned int numTilesWideAtLod0,
                 unsigned int numTilesHighAtLod0)
 {
-    if ( vsrsInitString.empty() && numTilesWideAtLod0 == 0 && numTilesHighAtLod0 == 0 )
-    {
-        const Profile* named = osgEarth::Registry::instance()->getNamedProfile( srsInitString );
-        if ( named )
-            return const_cast<Profile*>( named );
-    }
-
-    osg::ref_ptr<const SpatialReference> srs = SpatialReference::create( srsInitString, vsrsInitString );
+    osg::ref_ptr<const SpatialReference> srs = SpatialReference::create( 
+        srsInitString, 
+        vsrsInitString );
 
     if ( srs.valid() && srs->isGeographic() )
     {
@@ -335,7 +334,7 @@ const Profile*
 Profile::create(const std::string& name)
 {
     // TODO: move the named profiles from Registry into here.
-    if ( ciEquals(name, "plate-carre") || ciEquals(name, "plate-carree") || ciEquals(name, "eqc-wgs84") )
+    if ( ciEquals(name, PLATE_CARREE) || ciEquals(name, "plate-carre") || ciEquals(name, "eqc-wgs84") )
     {
         // Yes I know this is not really Plate Carre but it will stand in for now.
         osg::Vec3d ex;
@@ -345,10 +344,30 @@ Profile::create(const std::string& name)
 
         return Profile::create(plateCarre, -ex.x(), -ex.y(), ex.x(), ex.y(), 2u, 1u);
     }
-
+    else if (ciEquals(name, GLOBAL_GEODETIC))
+    {
+        return create(
+            SpatialReference::create("wgs84"),
+            -180.0, -90.0, 180.0, 90.0,
+            2, 1);
+    }
+    else if (ciEquals(name, GLOBAL_MERCATOR))
+    {
+        return create(
+            SpatialReference::create("global-mercator"),
+            MERC_MINX, MERC_MINY, MERC_MAXX, MERC_MAXY,
+            1, 1);
+    }
+    else if (ciEquals(name, SPHERICAL_MERCATOR))
+    {
+        return create(
+            SpatialReference::create("spherical-mercator"),
+            MERC_MINX, MERC_MINY, MERC_MAXX, MERC_MAXY,
+            1, 1);
+    }
     else
     {
-        return osgEarth::Registry::instance()->getNamedProfile( name );
+        return create(name, "");
     }
 }
 
@@ -362,7 +381,7 @@ Profile::Profile(const SpatialReference* srs,
 
     _extent(srs, xmin, ymin, xmax, ymax)
 {
-    OE_SOFT_ASSERT(srs!=nullptr, __func__);
+    OE_SOFT_ASSERT(srs!=nullptr);
 
     _numTilesWideAtLod0 = numTilesWideAtLod0 != 0? numTilesWideAtLod0 : srs->isGeographic()? 2 : 1;
     _numTilesHighAtLod0 = numTilesHighAtLod0 != 0? numTilesHighAtLod0 : 1;
@@ -390,7 +409,7 @@ Profile::Profile(const SpatialReference* srs,
 
     _extent(srs, xmin, ymin, xmax, ymax)
 {
-    OE_SOFT_ASSERT(srs!=nullptr, __func__);
+    OE_SOFT_ASSERT(srs!=nullptr);
 
     _numTilesWideAtLod0 = numTilesWideAtLod0 != 0? numTilesWideAtLod0 : srs->isGeographic()? 2 : 1;
     _numTilesHighAtLod0 = numTilesHighAtLod0 != 0? numTilesHighAtLod0 : 1;
@@ -447,7 +466,7 @@ Profile::toString() const
         << std::setprecision(16)
         << "[srs=" << srs->getName() << ", min=" << _extent.xMin() << "," << _extent.yMin()
         << " max=" << _extent.xMax() << "," << _extent.yMax()
-        << " lod0=" << _numTilesWideAtLod0 << "," << _numTilesHighAtLod0
+        << " ar=" << _numTilesWideAtLod0 << ":" << _numTilesHighAtLod0
         << " vdatum=" << (srs->getVerticalDatum() ? srs->getVerticalDatum()->getName() : "geodetic")
         << "]";
 }
@@ -695,26 +714,6 @@ Profile::clampAndTransformExtent(const GeoExtent& input, bool* out_clamped) cons
     }    
 }
 
-namespace
-{
-    double round( double in, int places )
-    {
-        for(int i=0; i<places; ++i)
-            in *= 10.0;
-        in = ceil(in);
-        for(int i=0; i<places; ++i)
-            in *= 0.1;
-        return in;
-    }
-
-    int quantize( double in, double epsilon )
-    {
-        int floored = (int)in;
-        int floored2 = (int)(in + epsilon);
-        return floored == floored2 ? floored : floored2;
-    }
-}
-
 void
 Profile::addIntersectingTiles(const GeoExtent& key_ext, unsigned localLOD, std::vector<TileKey>& out_intersectingKeys) const
 {
@@ -731,20 +730,32 @@ Profile::addIntersectingTiles(const GeoExtent& key_ext, unsigned localLOD, std::
     double destTileWidth, destTileHeight;
     getTileDimensions(localLOD, destTileWidth, destTileHeight);
 
-    //OE_DEBUG << std::fixed << "  Source Tile: " << key.getLevelOfDetail() << " (" << keyWidth << ", " << keyHeight << ")" << std::endl;
-    //OE_DEBUG << std::fixed << "  Dest Size: " << destLOD << " (" << destTileWidth << ", " << destTileHeight << ")" << std::endl;
-
+    double west = key_ext.xMin() - _extent.xMin();
     double east = key_ext.xMax() - _extent.xMin();
-    bool xMaxOnTileBoundary = fmod(east, destTileWidth) == 0.0;
-
     double south = _extent.yMax() - key_ext.yMin();
-    bool yMaxOnTileBoundary = fmod(south, destTileHeight) == 0.0;
+    double north = _extent.yMax() - key_ext.yMax();
 
-    tileMinX = (int)((key_ext.xMin() - _extent.xMin()) / destTileWidth);
-    tileMaxX = (int)(east / destTileWidth) - (xMaxOnTileBoundary ? 1 : 0);
+    tileMinX = (int)(west / destTileWidth);
+    tileMaxX = (int)(east / destTileWidth);
 
-    tileMinY = (int)((_extent.yMax() - key_ext.yMax()) / destTileHeight); 
-    tileMaxY = (int)(south / destTileHeight) - (yMaxOnTileBoundary ? 1 : 0);
+    tileMinY = (int)(north / destTileHeight);
+    tileMaxY = (int)(south / destTileHeight);
+
+    // If the east or west border fell right on a tile boundary
+    // but doesn't actually use that tile, detect that and eliminate
+    // the extranous tiles. (This happens commonly when mapping
+    // geodetic to mercator for example)
+
+    double quantized_west = destTileWidth * (double)tileMinX;
+    double quantized_east = destTileWidth * (double)(tileMaxX + 1);
+
+    if (osg::equivalent(west - quantized_west, destTileWidth))
+        ++tileMinX;
+    if (osg::equivalent(quantized_east - east, destTileWidth))
+        --tileMaxX;
+
+    if (tileMaxX < tileMinX)
+        tileMaxX = tileMinX;
 
     unsigned int numWide, numHigh;
     getNumTiles(localLOD, numWide, numHigh);
@@ -830,15 +841,19 @@ Profile::getIntersectingTiles(const GeoExtent& extent, unsigned localLOD, std::v
 unsigned
 Profile::getEquivalentLOD( const Profile* rhsProfile, unsigned rhsLOD ) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(rhsProfile!=nullptr, __func__, rhsLOD);
+    OE_SOFT_ASSERT_AND_RETURN(rhsProfile!=nullptr, rhsLOD);
 
     //If the profiles are equivalent, just use the incoming lod
     if (rhsProfile->isHorizEquivalentTo( this ) ) 
         return rhsLOD;
 
+    static osg::ref_ptr<const Profile> ggProfile = Profile::create(Profile::GLOBAL_GEODETIC);
+    static osg::ref_ptr<const Profile> smProfile = Profile::create(Profile::SPHERICAL_MERCATOR);
+
     // Special check for geodetic to mercator or vise versa, they should match up in LOD.
-    if ((rhsProfile->isEquivalentTo(Registry::instance()->getSphericalMercatorProfile()) && isEquivalentTo(Registry::instance()->getGlobalGeodeticProfile())) ||
-        (rhsProfile->isEquivalentTo(Registry::instance()->getGlobalGeodeticProfile()) && isEquivalentTo(Registry::instance()->getSphericalMercatorProfile())))
+    // TODO not sure about this.. -gw
+    if ((rhsProfile->isEquivalentTo(smProfile.get()) && isEquivalentTo(ggProfile.get())) ||
+        (rhsProfile->isEquivalentTo(ggProfile.get()) && isEquivalentTo(smProfile.get())))
     {
         return rhsLOD;
     }

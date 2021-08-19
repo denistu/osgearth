@@ -660,14 +660,18 @@ FeatureModelGraph::open()
     {
         optional<float> maxRange(FLT_MAX);
 
+        bool haveLayout = _options.layout().isSet();
+        bool haveTileSize = haveLayout && _options.layout()->tileSize().isSet();
+        bool haveTSF = haveLayout && _options.layout()->tileSizeFactor().isSet();
+
         // if there's a layout max_range, use that:
-        if (_options.layout().isSet() && _options.layout()->maxRange().isSet())
+        if (haveLayout && _options.layout()->maxRange().isSet())
         {
             maxRange = _options.layout()->maxRange().get();
         }
 
         // if the level-zero's max range is even less, use THAT:
-        if (_options.layout().isSet() &&
+        if (haveLayout &&
             _options.layout()->getNumLevels() > 0 &&
             _options.layout()->getLevel(0)->maxRange().isSet())
         {
@@ -682,9 +686,7 @@ FeatureModelGraph::open()
         }
 
         // If the user asked for a particular tile size, give it to them!
-        if (_options.layout().isSet() &&
-            _options.layout()->tileSize().isSet() &&
-            _options.layout()->tileSize().get() > 0.0)
+        if (haveTileSize && _options.layout()->tileSize().get() > 0.0)
         {
             if (maxRange.isSet())
             {
@@ -695,12 +697,24 @@ FeatureModelGraph::open()
                 maxRange = _options.layout()->tileSizeFactor().get() * _options.layout()->tileSize().get();
             }
 
-            OE_INFO << LC << "Tile size = " << (*_options.layout()->tileSize()) << " ==> TRF = " <<
-                (*_options.layout()->tileSizeFactor()) << "\n";
+            OE_INFO << LC
+                << "Tile size = " << (*_options.layout()->tileSize()) 
+                << ", calc TSF = " << (*_options.layout()->tileSizeFactor())
+                << std::endl;
         }
 
-        if (_options.layout().isSet() &&
-            _options.layout()->getNumLevels() > 0)
+        // If we ONLY have a max range, reverse-engineer the tileSizeFactor from that.
+        if (maxRange.isSet() && !haveTSF && !haveTileSize)
+        {
+            float size = (2.0*_fullWorldBound.radius() / 1.1412);
+            _options.layout()->tileSizeFactor() = maxRange.get() / size;
+            OE_INFO << LC 
+                << "maxRange = " << maxRange.get() 
+                << ", calc tile size = " << size 
+                << ", calc TSF = " << (*_options.layout()->tileSizeFactor()) << std::endl;
+        }
+
+        if (haveLayout && _options.layout()->getNumLevels() > 0)
         {
             // for each custom level, calculate the best LOD match and store it in the level
             // layout data. We will use this information later when constructing the SG in
@@ -875,21 +889,7 @@ FeatureModelGraph::getBoundInWorldCoords(const GeoExtent& extent, const Profile*
         }
 #endif
         // Expand the bounding sphere to account for the min/max elevation
-        osg::BoundingSphered bs = workingExtent.createWorldBoundingSphere(minElevation, maxElevation);
-
-        // account for a worldwide bound:
-        double minRadius = osg::minimum(
-            map->getSRS()->getEllipsoid()->getRadiusPolar(),
-            map->getSRS()->getEllipsoid()->getRadiusEquator());
-
-        double maxRadius = osg::maximum(
-            map->getSRS()->getEllipsoid()->getRadiusPolar(),
-            map->getSRS()->getEllipsoid()->getRadiusEquator());
-
-        if (bs.radius() > minRadius / 2.0)
-            return osg::BoundingSphered(osg::Vec3d(0, 0, 0), maxRadius);
-
-        return bs;
+        return workingExtent.createWorldBoundingSphere(minElevation, maxElevation);
     }
 
     // fallback OR projected map approach
@@ -940,11 +940,7 @@ FeatureModelGraph::setupPaging()
     osg::ref_ptr<osg::Group> topNode;
     osg::ref_ptr<osg::Node> node;
 
-#ifdef USE_PAGING_MANAGER
-    topNode = new PagingManager();
-#else
     topNode = new osg::Group();
-#endif
 
     if (_options.layout()->paged() == true)
     {
@@ -2119,7 +2115,7 @@ FeatureModelGraph::redraw()
         node = fader;
     }
 
-    OE_SOFT_ASSERT_AND_RETURN(node.valid(), __func__, );
+    OE_SOFT_ASSERT_AND_RETURN(node.valid(), void());
 
     runPreMergeOperations(node.get());
 

@@ -47,6 +47,8 @@ using namespace osgEarth;
 
 #define OE_DEVEL OE_DEBUG
 
+//#define USE_ICO 1
+
 Texture::GCState&
 Texture::get(const osg::State& state) const
 {
@@ -104,7 +106,7 @@ Texture::compileGLObjects(osg::State& state) const
     }
 
     // Blit our image to the GPU
-    gc._gltexture->bind();
+    gc._gltexture->bind(state);
 
     if (target == GL_TEXTURE_2D_ARRAY)
     {
@@ -135,12 +137,15 @@ Texture::compileGLObjects(osg::State& state) const
 
     glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY_EXT, 4.0f);
 
-    // Foce creation of the bindless handle - once you do this, you can
+    // Force creation of the bindless handle - once you do this, you can
     // no longer change the texture parameters.
-    gc._gltexture->handle();
+    gc._gltexture->handle(state);
 
     // debugging
-    OE_DEVEL << LC << "Texture::compileGLObjects '" << gc._gltexture->id() << "' name=" << gc._gltexture->name() << " handle=" << gc._gltexture->handle() << std::endl;
+    OE_DEVEL << LC 
+        << "Texture::compileGLObjects '" << gc._gltexture->id() 
+        << "' name=" << gc._gltexture->name() 
+        << " handle=" << gc._gltexture->handle(state) << std::endl;
 
     // TODO: At this point, if/when we go with SPARSE textures,
     // don't actually copy the image down until activation.
@@ -240,6 +245,10 @@ Texture::makeResident(const osg::State& state, bool toggle) const
     if (gc._gltexture != nullptr) //.valid())
     {
         gc._gltexture->makeResident(toggle);
+
+        OE_DEVEL << LC
+            << "Texture::makeResident '" << gc._gltexture->id()
+            << "' name=" << gc._gltexture->name() << std::endl;
     }
 }
 
@@ -261,7 +270,10 @@ Texture::releaseGLObjects(osg::State* state) const
             GCState& gc = get(*state);
 
             // debugging
-            OE_DEVEL << LC << "Texture::releaseGLObjects '" << gc._gltexture->id() << "' name=" << gc._gltexture->name() << " handle=" << gc._gltexture->handle() << std::endl;
+            OE_DEVEL << LC 
+                << "Texture::releaseGLObjects '" << gc._gltexture->id() 
+                << "' name=" << gc._gltexture->name() 
+                << " handle=" << gc._gltexture->handle(*state) << std::endl;
 
             // will activate the releaser
             gc._gltexture = nullptr;
@@ -300,7 +312,7 @@ TextureArena::~TextureArena()
 bool
 TextureArena::add(Texture::Ptr tex)
 {
-    OE_SOFT_ASSERT_AND_RETURN(tex != nullptr, __func__, false);
+    OE_SOFT_ASSERT_AND_RETURN(tex != nullptr, false);
 
     if (tex->_image.valid() == false)
     {
@@ -414,7 +426,9 @@ TextureArena::apply(osg::State& state) const
         std::copy(_textures.begin(), _textures.end(), gc._toAdd.begin());
     }
 
-    osgUtil::IncrementalCompileOperation* ico = NULL;
+    osgUtil::IncrementalCompileOperation* ico = nullptr;
+
+#ifdef USE_ICO
     if (!gc._toAdd.empty())
     {
         const osg::Camera* camera = state.getGraphicsContext()->getCameras().front();
@@ -422,6 +436,7 @@ TextureArena::apply(osg::State& state) const
         if (osgView)
             ico = const_cast<osgViewer::View*>(osgView)->getDatabasePager()->getIncrementalCompileOperation();
     }
+#endif
 
     // allocate textures and resident handles
 
@@ -501,6 +516,7 @@ TextureArena::apply(osg::State& state) const
 void
 TextureArena::compileGLObjects(osg::State& state) const
 {
+    OE_DEBUG << LC << "Compiling GL objects for arena " << getName() << std::endl;
     apply(state);
 }
 
@@ -532,7 +548,7 @@ TextureArena::releaseGLObjects(osg::State* state) const
     }
     else
     {
-        for (int i = 0; i < _gc.size(); ++i)
+        for (unsigned i = 0; i < _gc.size(); ++i)
             _gc[i]._handleLUT.release();
     }
 }
@@ -598,7 +614,7 @@ TextureArena::HandleLUT::refresh(const TextureVector& textures, osg::State& stat
         GLTexture* glTex = tex->_gc[state.getContextID()]._gltexture.get();
         GLuint64 handle = 0ULL;
         if (glTex)
-            handle = glTex->handle();
+            handle = glTex->handle(state);
 
         if (_buf[i] != handle)
         {

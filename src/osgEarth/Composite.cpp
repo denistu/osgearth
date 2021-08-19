@@ -191,7 +191,7 @@ CompositeImageLayer::openImplementation()
 
         if (status.isOK())
         {
-            OE_INFO << LC << "...opened " << layer->getName() << " OK" << std::endl;
+            OE_DEBUG << LC << "...opened " << layer->getName() << " OK" << std::endl;
 
             // If no profile is specified assume they want to use the profile of the first layer in the list
             if (!profile.valid())
@@ -268,7 +268,7 @@ CompositeImageLayer::openImplementation()
         {
             if (getCacheSettings()->isCacheEnabled())
             {
-                profile = Profile::create("global-geodetic");
+                profile = Profile::create(Profile::GLOBAL_GEODETIC);
             }
             else
             {
@@ -615,7 +615,7 @@ CompositeElevationLayer::openImplementation()
 
         if (status.isOK())
         {
-            OE_INFO << LC << "...opened " << layer->getName() << " OK" << std::endl;
+            OE_DEBUG << LC << "...opened " << layer->getName() << " OK" << std::endl;
 
             // If no profile is specified assume they want to use the profile of the first layer in the list.
             if (!profile.valid())
@@ -689,7 +689,7 @@ CompositeElevationLayer::openImplementation()
     {
         if (getCacheSettings()->isCacheEnabled())
         {
-            profile = Profile::create("global-geodetic");
+            profile = Profile::create(Profile::GLOBAL_GEODETIC);
         }
         else
         {
@@ -894,7 +894,7 @@ CompositeLandCoverLayer::openImplementation()
 
         if (status.isOK())
         {
-            OE_INFO << LC << "...opened " << layer->getName() << " OK" << std::endl;
+            OE_DEBUG << LC << "...opened " << layer->getName() << " OK" << std::endl;
 
             // If no profile is specified assume they want to use the profile of the first layer in the list.
             if (!profile.valid())
@@ -969,7 +969,7 @@ CompositeLandCoverLayer::openImplementation()
     {
         if (getCacheSettings()->isCacheEnabled())
         {
-            profile = Profile::create("global-geodetic");
+            profile = Profile::create(Profile::GLOBAL_GEODETIC);
         }
         else
         {

@@ -68,9 +68,9 @@ namespace
         Config assetConfig;
     };
 
-    typedef std::vector<AssetLUTEntry> AssetLUTVector;
+    using AssetLUTVector = std::vector<AssetLUTEntry>;
 
-    typedef UnorderedMap<const LandCoverGroup*, AssetLUTVector> AssetLUT;
+    using AssetLUT = std::unordered_map<const LandCoverGroup*, AssetLUTVector>;
 
     void buildLUT(const BiomeZone& zone, AssetLUT& lut)
     {
@@ -236,6 +236,13 @@ GroundCoverFeatureGenerator::initialize()
                 return;
             }
         }
+    }
+
+    // make sure the mask layer is not compressed since we are
+    // going to sample it in CPU
+    if (_masklayer.valid())
+    {
+        _masklayer->options().textureCompression() = "none";
     }
 
     // create noise texture

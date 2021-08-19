@@ -21,7 +21,7 @@
 #include <osgEarth/TerrainTileModel>
 #include <osgEarth/TileKey>
 #include <osgEarth/Locators>
-#include <osg/Node>
+#include <osg/MatrixTransform>
 #include <osg/ValueObject>
 
 using namespace osgEarth;
@@ -30,14 +30,6 @@ using namespace osgEarth::REX;
 
 #undef LC
 #define LC "[REX::CreateTileImpl] "
-
-namespace
-{
-    struct MinMax {
-        osg::Vec3d min, max;
-    };
-}
-
 
 osg::Node*
 CreateTileImplementation::createTile(

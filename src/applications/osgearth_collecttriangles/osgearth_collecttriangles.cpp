@@ -42,7 +42,7 @@
 
 #include <iostream>
 
-#include <osgEarth/Metrics>
+
 #include <osgEarth/TerrainTileNode>
 
 
@@ -138,21 +138,50 @@ struct CollectTriangles
 struct CollectTrianglesVisitor : public osg::NodeVisitor
 {
     CollectTrianglesVisitor() :
-        //osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ACTIVE_CHILDREN)
-        osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN)
+        osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ACTIVE_CHILDREN)
+        //osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN)
     {
         _vertices.reserve(1000000);
+        _colors.reserve(1000000);
     }
 
     bool intersects(osg::Node& node)
     {
         static osg::Matrix identity;
-        osg::Matrix& matrix = _matrixStack.empty() ? identity : _matrixStack.back();
+        osg::Matrix& l2w = _matrixStack.empty() ? identity : _matrixStack.back();
 
-        osg::BoundingSphere nodeBounds = node.getBound();
-        nodeBounds.center() += matrix.getTrans();
+        // Dealing with scale, taken from Transform.cpp
+        osg::BoundingSphere bsphere = node.getBound();
 
-        return nodeBounds.intersects(_queryBounds);
+        osg::BoundingSphere::vec_type xdash = bsphere._center;
+        xdash.x() += bsphere._radius;
+        xdash = xdash * l2w;
+
+        osg::BoundingSphere::vec_type ydash = bsphere._center;
+        ydash.y() += bsphere._radius;
+        ydash = ydash * l2w;
+
+        osg::BoundingSphere::vec_type zdash = bsphere._center;
+        zdash.z() += bsphere._radius;
+        zdash = zdash * l2w;
+
+        bsphere._center = bsphere._center*l2w;
+
+        xdash -= bsphere._center;
+        osg::BoundingSphere::value_type sqrlen_xdash = xdash.length2();
+
+        ydash -= bsphere._center;
+        osg::BoundingSphere::value_type sqrlen_ydash = ydash.length2();
+
+        zdash -= bsphere._center;
+        osg::BoundingSphere::value_type sqrlen_zdash = zdash.length2();
+
+        bsphere._radius = sqrlen_xdash;
+        if (bsphere._radius < sqrlen_ydash) bsphere._radius = sqrlen_ydash;
+        if (bsphere._radius < sqrlen_zdash) bsphere._radius = sqrlen_zdash;
+        bsphere._radius = (osg::BoundingSphere::value_type)sqrt(bsphere._radius);
+
+        return bsphere.intersects(_queryBounds);
     }
 
     void apply(osg::Node& node)
@@ -180,6 +209,9 @@ struct CollectTrianglesVisitor : public osg::NodeVisitor
     {
         if (intersects(drawable))
         {
+            Random prng(static_cast<unsigned int>(reinterpret_cast<uint64_t>(&drawable)));
+            osg::Vec4 color(prng.next(), prng.next(), prng.next(), 1.0f);
+
             osg::TriangleFunctor<CollectTriangles> triangleCollector;
             drawable.accept(triangleCollector);
             for (unsigned int j = 0; j < triangleCollector.verts->size(); j++)
@@ -188,6 +220,7 @@ struct CollectTrianglesVisitor : public osg::NodeVisitor
                 osg::Matrix& matrix = _matrixStack.empty() ? identity : _matrixStack.back();
                 osg::Vec3d v = (*triangleCollector.verts)[j];
                 _vertices.emplace_back(v * matrix);
+                _colors.emplace_back(color);
             }
         }
     }
@@ -204,6 +237,9 @@ struct CollectTrianglesVisitor : public osg::NodeVisitor
         osg::Vec3Array* verts = new osg::Vec3Array;
         geom->setVertexArray(verts);
 
+        osg::Vec4Array* colors = new osg::Vec4Array();
+        geom->setColorArray(colors, osg::Array::BIND_PER_VERTEX);
+
         bool first = true;
         osg::Vec3d anchor;
 
@@ -215,11 +251,11 @@ struct CollectTrianglesVisitor : public osg::NodeVisitor
                 first = false;
             }
             verts->push_back(_vertices[i] - anchor);
+            colors->push_back(_colors[i]);
         }
         geom->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, verts->size()));
-        osg::Vec4Array* colors = new osg::Vec4Array();
-        colors->push_back(osg::Vec4(1, 0, 0, 1));
-        geom->setColorArray(colors, osg::Array::BIND_OVERALL);
+
+        
         geom->getOrCreateStateSet()->setAttributeAndModes(new osg::Depth(osg::Depth::LEQUAL, 0, 1, true));
         geom->setCullingActive(false);
 
@@ -239,6 +275,7 @@ struct CollectTrianglesVisitor : public osg::NodeVisitor
 
     typedef std::vector<osg::Matrix> MatrixStack;
     std::vector<osg::Vec3d>  _vertices;
+    std::vector<osg::Vec4> _colors;
     MatrixStack _matrixStack;
     osg::BoundingSphere _queryBounds;
 };
@@ -273,9 +310,6 @@ struct QueryTrianglesHandler : public osgGA::GUIEventHandler
         if (ea.getEventType() == ea.MOVE)
         {
             osg::Vec3d world;
-            osgUtil::LineSegmentIntersector::Intersections hits;
-            osg::NodePath path;
-            path.push_back(_mapNode);
 
             if (_observer)
             {
@@ -287,11 +321,19 @@ struct QueryTrianglesHandler : public osgGA::GUIEventHandler
                 _observer = nullptr;
             }
 
+            
+
+            osgUtil::LineSegmentIntersector::Intersections hits;
+
+            osg::NodePath path;
+            path.push_back(_mapNode);
+
             if (view->computeIntersections(ea.getX(), ea.getY(), path, hits))
+            //if (_mapNode->getTerrain()->getWorldCoordsUnderMouse(view, ea.getX(), ea.getY(), world))
             {
-                _marker->setNodeMask(~0u);
-                // Get the point under the mouse:
                 world = hits.begin()->getWorldIntersectPoint();
+
+                _marker->setNodeMask(~0u);
 
                 // convert to map coords:
                 GeoPoint mapPoint;
@@ -842,7 +884,7 @@ struct PredictiveDataLoader : public osg::NodeVisitor
 
         osg::BoundingSphere nodeBounds = node.getBound();
         osg::BoundingSphered worldBounds(nodeBounds.center(), nodeBounds.radius());
-        worldBounds.center() += matrix.getTrans();
+        worldBounds.center() = worldBounds.center() * matrix;
 
         bool result = false;
         for (auto& bs : _areasToLoad)
@@ -865,7 +907,7 @@ struct PredictiveDataLoader : public osg::NodeVisitor
 
         osg::BoundingSphere nodeBounds = node.getBound();
         osg::BoundingSphered worldBounds(nodeBounds.center(), nodeBounds.radius());
-        worldBounds.center() += matrix.getTrans();
+        worldBounds.center() = worldBounds.center() * matrix;
 
         float minRange = FLT_MAX;
 
@@ -1244,10 +1286,6 @@ usage(const char* name)
 int
 main(int argc, char** argv)
 {
-    ImGuiNotifyHandler* notifyHandler = new ImGuiNotifyHandler();
-    osg::setNotifyHandler(notifyHandler);
-    osgEarth::setNotifyHandler(notifyHandler);
-
     osgEarth::initialize();
 
     osg::ArgumentParser arguments(&argc, argv);

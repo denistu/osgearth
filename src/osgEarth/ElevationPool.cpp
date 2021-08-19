@@ -185,9 +185,29 @@ ElevationPool::refresh(const Map* map)
                 de->maxLevel().get(),
                 layer->getMaxDataLevel());
 
-            maxLevel = layer->getProfile()->getEquivalentLOD(map->getProfile(), maxLevel);
+            // Convert the max level so it's relative to the map profile:
+            maxLevel = map->getProfile()->getEquivalentLOD(layer->getProfile(), maxLevel);
 
             index->Insert(a_min, a_max, maxLevel);
+        }
+
+        // if the layer doesn't publish dataExtent, the backup plan is to make
+        // up a max level and use the layer's full extent.
+        if (dataExtents.empty())
+        {
+            unsigned maxLevel = std::min(layer->getMaxDataLevel(), 12u);
+
+            GeoExtent ext = layer->getExtent();
+            if (!ext.isValid() && layer->getProfile())
+                ext = layer->getProfile()->getExtent();
+
+            if (ext.isValid())
+            {
+                GeoExtent extentInMapSRS = map->getProfile()->clampAndTransformExtent(ext);
+                a_min[0] = extentInMapSRS.xMin(), a_min[1] = extentInMapSRS.yMin();
+                a_max[0] = extentInMapSRS.xMax(), a_max[1] = extentInMapSRS.yMax();
+                index->Insert(a_min, a_max, maxLevel);
+            }
         }
     }
 
@@ -306,7 +326,8 @@ ElevationPool::getOrCreateRaster(
             false,      // no border
             true);      // initialize to HAE (0.0) heights
 
-        float* resolutions = new float[_tileSize*_tileSize];
+        std::vector<float> resolutions;
+        resolutions.assign(_tileSize*_tileSize, FLT_MAX);
 
         TileKey keyToUse;
         bool populated = false;
@@ -321,7 +342,7 @@ ElevationPool::getOrCreateRaster(
         {
             populated = layersToSample.populateHeightField(
                 hf.get(),
-                resolutions,
+                &resolutions,
                 keyToUse,
                 map->getProfileNoVDatum(), // want HAE for terrain building...? TODO
                 map->getElevationInterpolation(),
@@ -338,7 +359,6 @@ ElevationPool::getOrCreateRaster(
         // check for cancelation/deferral
         if (progress && progress->isCanceled())
         {
-            delete [] resolutions;
             return NULL;
         }
 
@@ -351,7 +371,6 @@ ElevationPool::getOrCreateRaster(
         }
         else
         {
-            delete [] resolutions;
             return NULL;
         }
     }
@@ -478,9 +497,9 @@ ElevationPool::prepareEnvelope(
 
     env._lod = osg::minimum(getLOD(refPointMap.x(), refPointMap.y()), (int)maxLOD);
 
-    //TODO: Fix this mess, doesn't work for insets.
+    // This can happen if the elevation data publishes no data extents
     if (env._lod < 0)
-        env._lod = 0;
+        env._lod = maxLOD;
 
     env._profile->getNumTiles(env._lod, env._tw, env._th);
 
@@ -645,6 +664,9 @@ ElevationPool::sampleMapCoords(
 
     for(auto& p : points)
     {
+        if (p.w() == FLT_MAX)
+            continue;
+
         {
             //OE_PROFILING_ZONE_NAMED("createTileKey");
 
@@ -660,7 +682,7 @@ ElevationPool::sampleMapCoords(
                     resolutionInMapUnits,
                     ELEVATION_TILE_SIZE);
 
-                lod = osg::minimum( getLOD(p.x(), p.y()), (int)maxLOD );
+                lod = std::min( getLOD(p.x(), p.y()), (int)maxLOD );
                 if (lod < 0)
                 {
                     p.z() = NO_DATA_VALUE;
@@ -899,6 +921,11 @@ ElevationPool::getSample(
     // Need to limit maxLOD <= INT_MAX else osg::minimum for lod will return -1 due to cast
     maxLOD = osg::minimum(maxLOD, static_cast<unsigned>(std::numeric_limits<int>::max()));
     int lod = osg::minimum( getLOD(p.x(), p.y()), (int)maxLOD );
+
+    // this can happen if the elevation data publishes no data extent information
+    if (lod < 0)
+        lod = maxLOD;
+
     if (lod >= 0)
     {
         key._tilekey = map->getProfile()->createTileKey(p.x(), p.y(), lod);

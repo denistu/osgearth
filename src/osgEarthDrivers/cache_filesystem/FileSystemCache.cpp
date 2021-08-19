@@ -325,7 +325,7 @@ namespace
         const FileSystemCacheOptions& options,
         std::shared_ptr<JobArena>& jobArena) :
 
-        CacheBin(binID),
+        CacheBin(binID, options.enableNodeCaching().get()),
         _jobArena(jobArena),
         _binPathExists(false),
         _options(options),
@@ -458,7 +458,7 @@ namespace
         // compressed cache data means there was an internal error
         OE_SOFT_ASSERT_AND_RETURN(
             rr.getImage() == nullptr || rr.getImage()->isCompressed() == false, 
-            __func__, ReadResult());
+            ReadResult());
 
         return rr;
     }
@@ -585,7 +585,7 @@ namespace
         // issue and make all the reads return CONST objects
         // This is not typical a big deal since most node geometry comes
         // from a URI anyway and the URI data will get cached.
-        if (_jobArena != nullptr && isNode)
+        if (isNode && _options.enableNodeCaching() == false)
             return true;
 
         // Wrap input objects in ref_ptrs so they will persist in our write functor lambda
@@ -616,7 +616,7 @@ namespace
 
                 if (image->isCompressed())
                 {
-                    OE_SOFT_ASSERT(image->isCompressed() == false, __func__);
+                    OE_SOFT_ASSERT(image->isCompressed() == false);
                 }
                 else
                 {

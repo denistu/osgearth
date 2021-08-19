@@ -53,8 +53,8 @@ _buffer_m(0.0)
 bool
 ViewFitter::createViewpoint(const std::vector<GeoPoint>& points, Viewpoint& outVP) const
 {
-    OE_SOFT_ASSERT_AND_RETURN(_mapSRS.valid(), __func__, false);
-    OE_SOFT_ASSERT_AND_RETURN(_camera.valid(), __func__, false);
+    OE_SOFT_ASSERT_AND_RETURN(_mapSRS.valid(), false);
+    OE_SOFT_ASSERT_AND_RETURN(_camera.valid(), false);
 
     if (points.empty())
         return false;
@@ -115,8 +115,8 @@ ViewFitter::createViewpoint(const std::vector<GeoPoint>& points, Viewpoint& outV
             C.z() = fabs(C.z());
             double t = C * osg::Vec3d(0,0,1); // dot product
 
-            zfar = mix(_mapSRS->getEllipsoid()->getRadiusEquator(),
-                       _mapSRS->getEllipsoid()->getRadiusPolar(),
+            zfar = mix(_mapSRS->getEllipsoid().getRadiusEquator(),
+                       _mapSRS->getEllipsoid().getRadiusPolar(),
                        t);
             eyeDist = zfar * 2.0;
         }
@@ -145,8 +145,8 @@ ViewFitter::createViewpoint(const std::vector<GeoPoint>& points, Viewpoint& outV
             C.z() = fabs(C.z());
             double t = C * osg::Vec3d(0,0,1); // dot product
 
-            zfar = mix(_mapSRS->getEllipsoid()->getRadiusEquator(),
-                       _mapSRS->getEllipsoid()->getRadiusPolar(),
+            zfar = mix(_mapSRS->getEllipsoid().getRadiusEquator(),
+                       _mapSRS->getEllipsoid().getRadiusPolar(),
                        t);
             eyeDist = zfar * 2.0;
         }
@@ -242,5 +242,32 @@ ViewFitter::createViewpoint(const GeoExtent& extent, Viewpoint& outVP) const
     std::vector<GeoPoint> points;
     points.emplace_back(extent.getSRS(), extent.xMin(), extent.yMin(), 0);
     points.emplace_back(extent.getSRS(), extent.xMax(), extent.yMax(), 0);
+    return createViewpoint(points, outVP);
+}
+
+bool
+ViewFitter::createViewpoint(const osg::Node* node, Viewpoint& outVP) const
+{
+    OE_SOFT_ASSERT_AND_RETURN(node != nullptr, false);
+
+    osg::BoundingSphere bs = node->getBound();
+    if (!bs.valid())
+        return false;
+
+    osg::Matrix m = osg::computeLocalToWorld(node->getParentalNodePaths()[0]);
+    bs.center() = bs.center() * m;
+
+    osg::Vec3d c = bs.center();
+    double r = bs.radius();
+
+    std::vector<GeoPoint> points;
+    GeoPoint p;
+    p.fromWorld(_mapSRS.get(), osg::Vec3d(c.x() + r, c.y(), c.z())); points.push_back(p);
+    p.fromWorld(_mapSRS.get(), osg::Vec3d(c.x() - r, c.y(), c.z())); points.push_back(p);
+    p.fromWorld(_mapSRS.get(), osg::Vec3d(c.x(), c.y() + r, c.z())); points.push_back(p);
+    p.fromWorld(_mapSRS.get(), osg::Vec3d(c.x(), c.y() - r, c.z())); points.push_back(p);
+    p.fromWorld(_mapSRS.get(), osg::Vec3d(c.x(), c.y(), c.z() + r)); points.push_back(p);
+    p.fromWorld(_mapSRS.get(), osg::Vec3d(c.x(), c.y(), c.z() - r)); points.push_back(p);
+
     return createViewpoint(points, outVP);
 }

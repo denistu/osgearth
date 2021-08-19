@@ -67,11 +67,11 @@ namespace
     {
         if (!hf)
             return false;
-        if (hf->getNumRows() < 2 || hf->getNumRows() > 1024) {
+        if (hf->getNumRows() < 1 || hf->getNumRows() > 1024) {
             OE_WARN << "row count = " << hf->getNumRows() << std::endl;
             return false;
         }
-        if (hf->getNumColumns() < 2 || hf->getNumColumns() > 1024) {
+        if (hf->getNumColumns() < 1 || hf->getNumColumns() > 1024) {
             OE_WARN << "col count = " << hf->getNumColumns() << std::endl;
             return false;
         }
@@ -98,6 +98,13 @@ ElevationLayer::init()
     if (!options().tileSize().isSet())
     {
         options().tileSize().init(257u);
+    }
+
+    // a small L2 cache will help with things like normal map creation
+    // (i.e. queries that sample neighboring tiles)
+    if (!options().l2CacheSize().isSet())
+    {
+        options().l2CacheSize() = 4u;
     }
 
     // Disable max-level support for elevation data because it makes no sense.
@@ -358,12 +365,7 @@ ElevationLayer::createHeightField(const TileKey& key, ProgressCallback* progress
 
     NetworkMonitor::ScopedRequestLayer layerRequest(getName());
 
-    // prevents 2 threads from creating the same object at the same time
-    //_sentry.lock(key);
-
     GeoHeightField result = createHeightFieldInKeyProfile(key, progress);
-
-    //_sentry.unlock(key);
 
     return result;
 }
@@ -379,6 +381,14 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
     {
         return result;
     }
+
+    // Prevents more than one thread from creating the same object
+    // at the same time. This helps a lot with elevation data since
+    // the many queries cross tile boundaries (like calculating 
+    // normal maps)
+    ScopedGate<TileKey> gate(_sentry, key, [&]() {
+        return _memCache.valid();
+    });
 
     // Check the memory cache first
     bool fromMemCache = false;
@@ -656,7 +666,7 @@ namespace
 bool
 ElevationLayerVector::populateHeightField(
     osg::HeightField*   hf,
-    float*              resolutions,
+    std::vector<float>* resolutions,
     const TileKey&      key,
     const Profile*      haeProfile,
     RasterInterpolation interpolation,
@@ -832,7 +842,7 @@ ElevationLayerVector::populateHeightField(
                 {
                     std::pair<double,double> res = contenders[0].key.getResolution(hf->getNumColumns());
                     for(unsigned i=0; i<hf->getNumColumns()*hf->getNumRows(); ++i)
-                        resolutions[i] = res.second;
+                        (*resolutions)[i] = res.second;
                 }
             }
         }
@@ -1026,7 +1036,7 @@ ElevationLayerVector::populateHeightField(
 
                 if (resolutions)
                 {
-                    resolutions[r*numColumns+c] = resolution;
+                    (*resolutions)[r*numColumns+c] = resolution;
                 }
             }
         }

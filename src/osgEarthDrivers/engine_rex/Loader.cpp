@@ -71,10 +71,10 @@ Merger::merge(LoadTileDataOperationPtr data, osg::NodeVisitor& nv)
 
         // create an empty state:
         osg::ref_ptr<osgUtil::StateToCompile> state = glcompiler.collectState(nullptr);
-        OE_SOFT_ASSERT_AND_RETURN(state.valid(), __func__, );
+        OE_SOFT_ASSERT_AND_RETURN(state.valid(), void());
 
         // populate it with the tile model contents:
-        data->_result.get()->getStateToCompile(*state.get());
+        data->_result.join()->getStateToCompile(*state.get());
 
         ScopedMutexLock lock(_mutex);
 

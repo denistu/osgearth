@@ -26,7 +26,6 @@
 #include <osgEarth/DrapingTechnique>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/Registry>
-#include <osgEarth/ResourceReleaser>
 #include <osgEarth/Lighting>
 #include <osgEarth/GLUtils>
 #include <osgEarth/HorizonClipPlane>
@@ -284,16 +283,12 @@ MapNode::init()
 
     setName( "osgEarth::MapNode" );
 
-    // Create and install a GL resource releaser that this node and extensions can use.
-    _resourceReleaser = new ResourceReleaser();
-    this->addChild(_resourceReleaser);
-
     // Construct the container for the terrain engine, which also hold the options.
     _terrainGroup = new StickyGroup();
     this->addChild(_terrainGroup);
 
-    // make a group for the model layers. (Sticky otherwise the osg optimizer will remove it)
-    _layerNodes = new StickyGroup();
+    // make a group for the model layers.  This node is a PagingManager instead of a regular Group to allow PagedNode's to be used within the layers.
+    _layerNodes = new PagingManager;
     _layerNodes->setName( "osgEarth::MapNode.layerNodes" );
 
     this->addChild( _layerNodes );
@@ -341,6 +336,9 @@ MapNode::open()
     if ( _terrainEngine )
     {
         _terrainEngine->setMap(_map.get(), options().terrain().get());
+
+        // Define PBR lighting on the terrain engine
+        _terrainEngine->getNode()->getOrCreateStateSet()->setDefine("OE_USE_PBR");
     }
     else
     {
@@ -633,12 +631,6 @@ TerrainEngine*
 MapNode::getTerrainEngine() const
 {
     return _terrainEngine;
-}
-
-ResourceReleaser*
-MapNode::getResourceReleaser() const
-{
-    return _resourceReleaser;
 }
 
 void
@@ -991,4 +983,14 @@ MapNode::getGeoPointUnderMouse(
         return output.fromWorld(getMapSRS(), world);
     }
     return false;
+}
+
+GeoPoint
+MapNode::getGeoPointUnderMouse(
+    osg::View* view,
+    float mx, float my) const
+{
+    GeoPoint p;
+    getGeoPointUnderMouse(view, mx, my, p);
+    return p;
 }
