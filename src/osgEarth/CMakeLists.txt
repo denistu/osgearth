@@ -1,5 +1,8 @@
 # osgEarth Core Library
 
+set(CMAKE_CXX_STANDARD 17)
+set(CXX_STANDARD_REQUIRED 1)
+
 IF(OSGEARTH_BUILD_SHARED_LIBS)
     ADD_DEFINITIONS(-DOSGEARTH_LIBRARY)
 ELSE ()
@@ -858,6 +861,10 @@ IF(Protobuf_FOUND AND Protobuf_PROTOC_EXECUTABLE)
   ENDIF()
 
   LINK_WITH_VARIABLES(${LIB_NAME} Protobuf_LIBRARIES)
+
+  find_package(PkgConfig)
+  pkg_check_modules(absl_log_internal_check_op REQUIRED absl_log_internal_check_op)
+  target_link_libraries(${LIB_NAME} ${absl_log_internal_check_op_LIBRARIES})
 ENDIF()
 
 # ESRI FileGeodatabase?
